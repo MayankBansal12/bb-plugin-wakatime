@@ -97,8 +97,13 @@ export default async function plugin(bb: BbPluginApi) {
     }[];
     if (cols.length > 0 && !cols.some((c) => c.name === "project_name")) {
       db.transaction(() => {
+        // Indexes follow the renamed table — drop them first so they can be
+        // recreated against the new table.
         db.exec(
-          `ALTER TABLE sessions RENAME TO sessions_v01;
+          `DROP INDEX IF EXISTS idx_sessions_started;
+           DROP INDEX IF EXISTS idx_sessions_ended;
+           DROP INDEX IF EXISTS idx_sessions_open;
+           ALTER TABLE sessions RENAME TO sessions_v01;
            CREATE TABLE sessions (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
              thread_id TEXT NOT NULL,
@@ -108,7 +113,6 @@ export default async function plugin(bb: BbPluginApi) {
              ended_at INTEGER
            );`,
         );
-        // Recreate indexes dropped with the renamed table.
         db.exec(
           `CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
            CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at);
