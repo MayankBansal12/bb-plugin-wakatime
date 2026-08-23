@@ -1,83 +1,54 @@
-# bb-plugin-waka
+# bb-plugin-wakatime
 
-A BB plugin.
+Time tracking for [bb](https://getbb.app) — like WakaTime, but for your AI agent work.
 
-## Manifest
+## What it measures
 
-`package.json` is the plugin manifest. Notable fields:
+- **Working time** — wall-clock while at least one thread is running. Parallel
+  threads don't inflate it (capped at 24h/day by definition).
+- **Agent compute** — sum of turn durations (prompt → agent finished), attributed
+  to the model configured at each turn start. Turns that started before the
+  plugin was installed are recorded with model `unknown`.
+- **Breakdowns** — working time per project and machine (interval union);
+  compute time and turn count per model.
+- **Parallelism** — agent compute ÷ working time (>1× means agents were
+  running concurrently).
 
-- `bb.server` — backend entry (required); optional `bb.app` for a frontend.
-- `bb.name` and `bb.description` — required human-facing identity.
-- `bb.branding` — required; declare `icon` as a BB icon name or a
-  plugin-relative compact SVG, or declare `logo.light` (with optional
-  `logo.dark`). Logo assets must be relative `.svg`, `.png`, or
-  `.webp` files.
-- `engines.bb` — supported bb app version range.
-- `engines.bbPluginSdk` — the lowest plugin SDK you need (scaffold:
-  `>=0.4.8`). BB reads this as a floor, not a ceiling: a later
-  SDK in the same major still loads your plugin.
-- `dependencies` — every package your source imports that BB does not provide.
-  `bb plugin build` inlines them into `dist/`, and git installs resolve this
-  list alone, so a build-required package here rather than in
-  `devDependencies` is what keeps your plugin installable. `devDependencies`
-  is for types and tooling only (BB shims React, the portal primitives, and
-  `@get-bb/plugin-sdk` at runtime — never bundle them).
-
-Run `bb plugin build` before publishing git/npm installs. It writes
-`dist/server.js` + `server.meta.json` (and, with `bb.app`, `app.js` /
-`app.css` / `app.meta.json`). Each `*.meta.json` stamps SDK major/version,
-`artifactFormatVersion`, `pluginId`, `pluginVersion`, and
-`builtWith` so managed installs can verify the artifacts.
+Threads waiting for a permission approval still count as active in v1.
 
 ## Install
 
-From this directory (`bb plugin new` already ran the install; a fresh clone
-needs it):
-
-```
-npm install
-bb plugin install .
+```sh
+bb plugin install git:https://github.com/MayankBansal12/bb-plugin-wakatime.git@main
 ```
 
-After editing sources, reload:
+Or pin a release:
 
-```
-bb plugin reload waka
-```
-
-## Configure
-
-```
-bb plugin config waka
-bb plugin config waka set greeting hi
+```sh
+bb plugin install git:https://github.com/MayankBansal12/bb-plugin-wakatime.git@semver:^0.1.0 --tag-prefix ""
 ```
 
-## Types & API reference
+## Use
 
-The plugin API ships as the npm package `@get-bb/plugin-sdk`, pinned to an
-exact version in `devDependencies` (`0.4.8` — the SDK of the BB
-that scaffolded this plugin). After `npm install`, the full surface is on disk
-at:
+- **Dashboard** — sidebar → Time (today / 7d / 30d / all).
+- **CLI** — `bb wakatime today` or `bb wakatime week`.
 
-```
-node_modules/@get-bb/plugin-sdk/bundled-types/bb-plugin-sdk.d.ts      # backend
-node_modules/@get-bb/plugin-sdk/bundled-types/bb-plugin-sdk-app.d.ts  # frontend
-```
+## Privacy & data
 
-Your editor and `tsc` resolve `@get-bb/plugin-sdk` there through ordinary node
-resolution — no path mapping. These are readable declarations: open them for an
-exact signature.
+- 100% local: everything is stored in the plugin's own SQLite database on your
+  bb server (`<dataDir>/plugins/wakatime/data.db`). No network calls, no
+  telemetry.
+- Never stored: thread titles, prompts, messages, or file contents. Only
+  intervals, project/machine names, provider/model strings, and turn counts.
+- Day boundaries use the bb server's local timezone.
 
-The SDK surface grows with every BB release, so the pin has to track the BB you
-actually run:
+## How it works
 
-```
-bb plugin types          # sync this plugin's SDK surface to the running BB
-bb plugin types --check  # CI: fail when it does not match
-```
+Thread lifecycle events open/close "sessions"; a background poller drains
+turn-started/turn-completed events to record per-model "turns". All stats are
+computed from these interval rows at query time. After a crash or restart,
+startup reconciliation adopts or closes any intervals left open.
 
-Ask BB to write plugins for you: the `bb-plugin-authoring` skill documents
-the whole surface with examples.
+## License
 
-Confused by the API, or need something the types don't explain? Clone the BB
-repo and read the source: <https://github.com/get-bb/bb>.
+MIT

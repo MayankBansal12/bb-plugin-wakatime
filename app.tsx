@@ -115,6 +115,7 @@ function Dashboard() {
   const rpc = useRpc<typeof rpcContract>();
   const [range, setRange] = useState<(typeof RANGES)[number]["id"]>("today");
   const [data, setData] = useState<Summary | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -125,6 +126,7 @@ function Dashboard() {
         if (alive) {
           setData(s);
           setError(null);
+          setLoading(false);
         }
       } catch (err) {
         if (alive) setError(String(err));
@@ -137,6 +139,10 @@ function Dashboard() {
       clearInterval(t);
     };
   }, [rpc, range]);
+  // Mark loading on range change so stale-range data is visually distinct.
+  useEffect(() => {
+    setLoading(true);
+  }, [range]);
 
   if (error)
     return <div className="p-6 text-sm text-red-500">Failed to load stats: {error}</div>;
@@ -150,6 +156,7 @@ function Dashboard() {
 
   return (
     <div className="mx-auto w-full max-w-3xl space-y-4 p-4 md:p-5">
+      <div className={loading ? "opacity-60 transition-opacity" : "transition-opacity"}>
       <div className="flex gap-1 rounded-lg border p-1 w-fit">
         {RANGES.map((r) => (
           <button
@@ -234,6 +241,7 @@ function Dashboard() {
           <span className="font-medium">{parallelism.toFixed(1)}×</span> parallelism.
         </div>
       ) : null}
+      </div>
     </div>
   );
 }
