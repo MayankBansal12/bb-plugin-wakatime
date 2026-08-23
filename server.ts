@@ -237,7 +237,13 @@ export default async function plugin(bb: BbPluginApi) {
         const p = await bb.sdk.projects.get({ projectId });
         projectName = p.name ?? projectId;
       } catch {
-        projectName = projectId;
+        try {
+          const all = await bb.sdk.projects.list({ includePersonal: true });
+          const hit = all.find((x) => x.id === projectId);
+          projectName = hit?.name ?? projectId;
+        } catch {
+          projectName = projectId;
+        }
       }
     }
     let machineName: string | null = null;
