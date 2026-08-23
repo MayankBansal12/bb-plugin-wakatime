@@ -323,26 +323,28 @@ export default async function plugin(bb: BbPluginApi) {
 
       const session = openSessions.get(threadId);
       for (const ev of events) {
+        // Skip already-processed sequence numbers (cursor is updated only
+        // after the batch, so replay after a crash can overlap).
+        if (ev.seq <= cursor.lastSeq) continue;
         cursor.lastSeq = ev.seq;
-        const data = ev.data as { turnId?: string };
         if (ev.type === "turn/started") {
-          if (!cursor.openTurnId) {
-            const snap = await snapshotThread(threadId);
-            cursor.model = snap.model;
-            cursor.providerId = snap.providerId;
-            cursor.openTurnId = data.turnId ?? null;
-            cursor.openTurnStartedAt = ev.createdAt ?? Date.now();
-            if (cursor.openTurnId) {
-              stmts.insertTurn.run(
-                threadId,
-                cursor.openTurnId,
-                session?.id ?? null,
-                cursor.providerId,
-                cursor.model,
-                cursor.openTurnStartedAt,
-              );
-            }
+          // Events carry no turnId — key intervals by the start event's seq.
+          if (cursor.openTurnId) {
+            stmts.closeTurn.run(ev.createdAt, threadId, cursor.openTurnId);
           }
+          const snap = await snapshotThread(threadId);
+          cursor.model = snap.model;
+          cursor.providerId = snap.providerId;
+          cursor.openTurnId = String(ev.seq);
+          cursor.openTurnStartedAt = ev.createdAt ?? Date.now();
+          stmts.insertTurn.run(
+            threadId,
+            cursor.openTurnId,
+            session?.id ?? null,
+            cursor.providerId,
+            cursor.model,
+            cursor.openTurnStartedAt,
+          );
         } else if (ev.type === "turn/completed") {
           if (!cursor.openTurnId) {
             // Crash mid-turn: recover start time from the stored row.
