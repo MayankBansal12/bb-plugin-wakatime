@@ -314,6 +314,7 @@ export default async function plugin(bb: BbPluginApi) {
         cursors.set(threadId, cursor);
       }
 
+      bb.log.info(`poll ${threadId} seq=${cursor.lastSeq}`);
       const events = await bb.sdk.threads.events.list({
         threadId,
         types: ["turn/started", "turn/completed"],
@@ -366,7 +367,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
       stmts.setCursor.run(threadId, cursor.lastSeq);
     } catch (err) {
-      bb.log.debug(`poll error ${threadId}: ${String(err)}`);
+      bb.log.error(`poll error ${threadId}: ${String(err)}`);
     }
   }
 
