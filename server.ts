@@ -88,7 +88,33 @@ export default async function plugin(bb: BbPluginApi) {
       thread_id TEXT PRIMARY KEY,
       last_seq INTEGER NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`,
   ]);
+
+  // Heartbeat: lets crash recovery bound downtime attribution instead of
+  // charging everything between crash and restart as active time.
+  const HEARTBEAT_GRACE_MS = 90_000;
+  const setHeartbeat = db.prepare(
+    `INSERT INTO meta (key, value) VALUES ('last_alive', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  );
+  const getHeartbeat = db.prepare(
+    `SELECT value FROM meta WHERE key = 'last_alive'`,
+  );
+  function lastAliveMs(): number {
+    const row = getHeartbeat.get() as { value: string } | undefined;
+    return row ? Number(row.value) : processStart;
+  }
+  /**
+   * The timestamp at which we can assume the process stopped observing.
+   * Bounded by the last heartbeat plus grace, never in the future.
+   */
+  function staleEnd(now: number): number {
+    return Math.min(now, Math.max(lastAliveMs(), processStart) + HEARTBEAT_GRACE_MS);
+  }
 
   // One-off migration from the v0.1 schema (project_id/machine_id columns).
   {
@@ -147,15 +173,19 @@ export default async function plugin(bb: BbPluginApi) {
        VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(thread_id, turn_id) DO NOTHING`,
     ),
-    closeOpenTurnsForThread: db.prepare(
+    closeOpenTurnsBefore: db.prepare(
       `UPDATE turns SET ended_at = ?
-         WHERE thread_id = ? AND ended_at IS NULL AND started_at < ?`,
+         WHERE thread_id = ? AND ended_at IS NULL AND started_at <= ?`,
+    ),
+    forceCloseOpenTurns: db.prepare(
+      `UPDATE turns SET ended_at = ?
+         WHERE thread_id = ? AND ended_at IS NULL`,
     ),
     closeAllOpenSessions: db.prepare(
       `UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL`,
     ),
-    closeAllOpenTurns: db.prepare(
-      `UPDATE turns SET ended_at = ? WHERE ended_at IS NULL AND started_at < ?`,
+    forceCloseAllOpenTurns: db.prepare(
+      `UPDATE turns SET ended_at = ? WHERE ended_at IS NULL`,
     ),
     getCursor: db.prepare(`SELECT last_seq FROM poll_cursors WHERE thread_id = ?`),
     setCursor: db.prepare(
@@ -286,6 +316,7 @@ export default async function plugin(bb: BbPluginApi) {
             threadId,
             startedAt: row.started_at,
           });
+        startPolling(threadId);
         return;
       }
       openSessions.set(threadId, {
@@ -302,6 +333,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!openSessions.has(threadId)) return;
       // Final drain so turns completed since the last poll are not lost.
       await drainEvents(threadId);
+      stmts.forceCloseOpenTurns.run(at, threadId);
       stmts.closeSessionByThread.run(at, threadId);
       openSessions.delete(threadId);
       stopPolling(threadId);
@@ -312,7 +344,9 @@ export default async function plugin(bb: BbPluginApi) {
   function forgetThread(threadId: string) {
     return withLock(threadId, async () => {
       await drainEvents(threadId);
-      stmts.closeSessionByThread.run(Date.now(), threadId);
+      const now = Date.now();
+      stmts.forceCloseOpenTurns.run(now, threadId);
+      stmts.closeSessionByThread.run(now, threadId);
       openSessions.delete(threadId);
       stopPolling(threadId);
       cursors.delete(threadId);
@@ -376,19 +410,14 @@ export default async function plugin(bb: BbPluginApi) {
       for (const ev of events) {
         if (ev.seq <= cursor.lastSeq) continue;
         cursor.lastSeq = ev.seq;
-        const completedAt = Math.max(ev.createdAt, cursor.openTurnStartedAt);
-        const scope = ev.scope as
-          | { kind: string; turnId?: string }
-          | undefined;
-        const evTurnId =
-          scope?.kind === "turn" && typeof scope.turnId === "string"
-            ? scope.turnId
-            : String(ev.seq);
+        // Start-event sequence is the canonical turn identity: replay-safe
+        // and unique per thread, unlike provider turn ids which can repeat.
+        const evTurnId = String(ev.seq);
 
         if (ev.type === "turn/started") {
           if (cursor.openTurnId) {
             // Missed completion — close the previous interval conservatively.
-            stmts.closeOpenTurnsForThread.run(ev.createdAt, threadId, ev.createdAt);
+            stmts.closeOpenTurnsBefore.run(ev.createdAt, threadId, ev.createdAt);
           }
           // Historical replays can't know which model was live then; only
           // attribute a model to turns that started while we are running.
@@ -422,7 +451,7 @@ export default async function plugin(bb: BbPluginApi) {
           }
           if (cursor.openTurnId) {
             const end = Math.max(ev.createdAt, cursor.openTurnStartedAt);
-            stmts.closeOpenTurnsForThread.run(end, threadId, end + 1);
+            stmts.closeOpenTurnsBefore.run(end, threadId, end);
             cursor.openTurnId = null;
             cursor.openTurnStartedAt = 0;
           }
@@ -455,10 +484,14 @@ export default async function plugin(bb: BbPluginApi) {
           });
           startPolling(row.thread_id);
         } else {
-          stmts.closeSessionById.run(Date.now(), row.id);
+          const end = Math.max(row.started_at, staleEnd(Date.now()));
+          stmts.forceCloseOpenTurns.run(end, row.thread_id);
+          stmts.closeSessionById.run(end, row.id);
         }
       } catch {
-        stmts.closeSessionById.run(Date.now(), row.id);
+        const end = Math.max(row.started_at, staleEnd(Date.now()));
+        stmts.forceCloseOpenTurns.run(end, row.thread_id);
+        stmts.closeSessionById.run(end, row.id);
       }
     }
     // Discover running threads (including hidden/child).
@@ -493,13 +526,13 @@ export default async function plugin(bb: BbPluginApi) {
   // ---- aggregation ------------------------------------------------------
   type Interval = { start: number; end: number };
 
-  function rangeStart(range: string): number {
-    const now = new Date();
+  function rangeStart(range: string, nowMs: number): number {
+    const now = new Date(nowMs);
     if (range === "today") {
       return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
     }
-    if (range === "7d") return Date.now() - 7 * 86_400_000;
-    if (range === "30d") return Date.now() - 30 * 86_400_000;
+    if (range === "7d") return nowMs - 7 * 86_400_000;
+    if (range === "30d") return nowMs - 30 * 86_400_000;
     return 0;
   }
 
@@ -556,7 +589,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   function computeSummary(range: string) {
     const to = Date.now();
-    const from = rangeStart(range);
+    const from = rangeStart(range, to);
     const activeEnd = `(COALESCE(ended_at, ${to}))`;
 
     const sessions = db
@@ -600,9 +633,15 @@ export default async function plugin(bb: BbPluginApi) {
       string,
       { model: string; providerId: string; computeMs: number; turnCount: number }
     >();
+    let totalComputeMs = 0;
     for (const t of turns) {
-      const iv = { start: t.started_at, end: t.ended };
-      splitByDay(iv.start, iv.end, computeDayMap);
+      // Clip to the requested range BEFORE splitting so totals, per-model
+      // sums, and daily buckets all agree on the same clipped intervals.
+      const start = Math.max(t.started_at, from);
+      const end = Math.min(t.ended, to);
+      if (end <= start) continue;
+      splitByDay(start, end, computeDayMap);
+      totalComputeMs += end - start;
       const key = `${t.provider_id}/${t.model}`;
       const m = modelMap.get(key) ?? {
         model: t.model || "unknown",
@@ -610,14 +649,10 @@ export default async function plugin(bb: BbPluginApi) {
         computeMs: 0,
         turnCount: 0,
       };
-      m.computeMs += Math.max(0, Math.min(t.ended, to) - Math.max(t.started_at, from));
+      m.computeMs += end - start;
       m.turnCount += 1;
       modelMap.set(key, m);
     }
-    const totalComputeMs = [...computeDayMap.values()].flat().reduce(
-      (acc, iv) => acc + (iv.end - iv.start),
-      0,
-    );
 
     const days = [...new Set([...dayMap.keys(), ...computeDayMap.keys()])]
       .sort()
@@ -704,9 +739,11 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.background.service("reconciler", {
     async start(signal) {
+      setHeartbeat.run(String(Date.now()));
       while (!signal.aborted) {
-        await sleep(60_000, signal);
+        await sleep(30_000, signal);
         if (signal.aborted) break;
+        setHeartbeat.run(String(Date.now()));
         try {
           await reconcile();
         } catch (err) {
@@ -721,8 +758,9 @@ export default async function plugin(bb: BbPluginApi) {
     for (const t of pollers.values()) clearInterval(t);
     pollers.clear();
     // Close everything at dispose time; reconciliation re-adopts on load.
+    stmts.forceCloseAllOpenTurns.run(now);
     stmts.closeAllOpenSessions.run(now);
-    stmts.closeAllOpenTurns.run(now, now);
+    setHeartbeat.run(String(now));
   });
 
   bb.log.info("wakatime plugin loaded");
