@@ -119,6 +119,9 @@ function ChartContainer({
         <RechartsPrimitive.ResponsiveContainer
           className="min-h-0 w-full flex-1"
           initialDimension={initialDimension}
+          width="100%"
+          height="100%"
+          style={{ minWidth: 0 }}
         >
           {children}
         </RechartsPrimitive.ResponsiveContainer>

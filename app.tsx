@@ -181,14 +181,49 @@ function truncate(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
-function Card({ title, note, action, children, className }: {
-  title?: string; note?: string; action?: ReactNode; children: ReactNode; className?: string;
+type IconName = "activity" | "agent" | "calendar" | "clock" | "flame" | "machine" | "model" | "project" | "sparkles";
+
+const ICON_PATHS: Record<IconName, ReactNode> = {
+  activity: <><path d="M3 12h3l2-6 4 12 2-6h7" /></>,
+  agent: <><rect x="4" y="5" width="16" height="14" rx="4" /><path d="M9 10h.01M15 10h.01M9 15h6M12 2v3" /></>,
+  calendar: <><rect x="3" y="5" width="18" height="16" rx="3" /><path d="M8 3v4M16 3v4M3 10h18" /></>,
+  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
+  flame: <><path d="M12 22c4 0 7-3 7-7 0-3-2-6-5-9 0 3-1 5-3 6 0-4-2-7-4-9 0 5-3 7-3 12 0 4 4 7 8 7Z" /></>,
+  machine: <><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4" /></>,
+  model: <><path d="m12 3 2.1 4.9L19 10l-4.9 2.1L12 17l-2.1-4.9L5 10l4.9-2.1L12 3Z" /><path d="m19 16 .8 1.8L22 19l-2.2 1.2L19 22l-.8-1.8L16 19l2.2-1.2L19 16Z" /></>,
+  project: <><path d="M3 7h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" /><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5" /></>,
+  sparkles: <><path d="m12 3 1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3Z" /><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z" /></>,
+};
+
+function Icon({ name, className }: { name: IconName; className?: string }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+      strokeLinecap="round" strokeLinejoin="round" className={cn("size-4 shrink-0", className)}>
+      {ICON_PATHS[name]}
+    </svg>
+  );
+}
+
+function ProviderLogo({ providerId, label }: { providerId: string; label?: string }) {
+  const normalized = providerId.trim().toLowerCase();
+  const name = label ?? providerLabel(providerId);
+  const mark = normalized.includes("claude") ? "A" : normalized.includes("open") ? "O" : normalized === "pi" ? "π" : normalized.includes("codex") ? "◈" : "?";
+  const tone = normalized.includes("claude") ? "claude" : normalized.includes("open") ? "opencode" : normalized === "pi" ? "pi" : normalized.includes("codex") ? "codex" : "unknown";
+  return <span className="wk-provider-logo" data-provider={tone} data-wk-tooltip={name} aria-label={name}>{mark}</span>;
+}
+
+function Card({ title, note, icon, action, children, className }: {
+  title?: string; note?: string; icon?: IconName; action?: ReactNode; children: ReactNode; className?: string;
 }) {
   return (
     <section className={cn("bg-card border-border flex min-w-0 flex-col rounded-xl border p-4", className)}>
       {title ? (
         <div className="mb-3 flex items-center justify-between gap-3">
-          <h2 className="text-foreground text-[13px] leading-none font-medium" title={note}>{title}</h2>
+          <h2 className="text-foreground flex min-w-0 items-center gap-2 text-[13px] leading-none font-medium"
+            data-wk-tooltip={note} tabIndex={note ? 0 : undefined}>
+            {icon ? <Icon name={icon} className="text-muted-foreground" /> : null}
+            <span className="truncate">{title}</span>
+          </h2>
           {action}
         </div>
       ) : null}
@@ -197,14 +232,17 @@ function Card({ title, note, action, children, className }: {
   );
 }
 
-function Metric({ label, value, unit, detail }: {
-  label: string; value: string; unit?: string; detail?: string;
+function Metric({ label, value, unit, detail, icon, logo }: {
+  label: string; value: string; unit?: string; detail?: string; icon: IconName; logo?: ReactNode;
 }) {
   return (
     <div className="bg-card border-border min-w-0 rounded-xl border p-4">
-      <p className="text-muted-foreground truncate text-[11px] leading-none opacity-80">{label}</p>
-      <p className="text-foreground mt-2.5 truncate text-[22px] leading-none font-semibold tracking-tight tabular-nums">
-        {value}
+      <p className="text-muted-foreground flex items-center gap-1.5 truncate text-[11px] leading-none opacity-80">
+        <Icon name={icon} className="size-3.5" /> {label}
+      </p>
+      <p className="text-foreground mt-2.5 flex min-w-0 items-center gap-2 text-[22px] leading-none font-semibold tracking-tight tabular-nums">
+        {logo}
+        <span className="truncate" data-wk-tooltip={value}>{value}</span>
         {unit ? <span className="text-muted-foreground ml-1 text-sm font-normal">{unit}</span> : null}
       </p>
       {detail ? <p className="text-muted-foreground mt-2 truncate text-[11px] leading-none opacity-70">{detail}</p> : null}
@@ -228,6 +266,8 @@ const WEEKDAY_COL = 30;
 const LABEL_GAP = 6;
 
 function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }) {
+  const [hoveredCell, setHoveredCell] = useState<{ text: string; x: number; y: number } | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const { weeks, months, thresholds } = useMemo(() => {
     const byDate = new Map(days.map((day) => [day.date, day]));
 
@@ -284,11 +324,26 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
 
   const gridWidth = WEEKDAY_COL + HEATMAP_WEEKS * PITCH - CELL_GAP;
 
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (scroller) scroller.scrollLeft = scroller.scrollWidth - scroller.clientWidth;
+  }, [gridWidth]);
+
+  const showCellTooltip = (element: HTMLElement, text: string, x?: number, y?: number) => {
+    const rect = element.getBoundingClientRect();
+    setHoveredCell({
+      text,
+      x: Math.min(window.innerWidth - 12, Math.max(12, x ?? rect.left + rect.width / 2)),
+      y: Math.max(12, y ?? rect.top),
+    });
+  };
+
   return (
     <div data-wk-heat>
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h2 className="text-foreground text-[13px] leading-none font-medium" title={`Daily working time · ${timezone}`}>
-          Every day bb worked
+        <h2 className="text-foreground flex items-center gap-2 text-[13px] leading-none font-medium"
+          data-wk-tooltip={`Daily working time · ${timezone}`} tabIndex={0}>
+          <Icon name="calendar" className="text-muted-foreground" /> Every day bb worked
         </h2>
         <span className="text-muted-foreground flex shrink-0 items-center gap-1 text-[11px] leading-none opacity-70">
           less
@@ -302,16 +357,14 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
         </span>
       </div>
 
-      <div className="overflow-x-auto pb-0.5">
-        <div style={{ width: gridWidth }}>
+      <div ref={scrollRef} className="overflow-x-auto pb-0.5" aria-label="Daily working time for the trailing year">
+        <div style={{ width: "100%", minWidth: gridWidth }}>
           {/* month row: absolutely placed so each label sits over its own column */}
-          <div className="relative" style={{ height: 14, marginBottom: CELL_GAP }}>
+          <div className="relative" style={{ height: 14, marginBottom: CELL_GAP, marginLeft: WEEKDAY_COL }}>
             {months.map((month) => (
-              <span
-                key={`${month.label}-${month.index}`}
+              <span key={`${month.label}-${month.index}`}
                 className="text-muted-foreground absolute top-0 text-[10px] leading-[14px] opacity-70"
-                style={{ left: WEEKDAY_COL + month.index * PITCH }}
-              >
+                style={{ left: `${(month.index / (HEATMAP_WEEKS - 1)) * 100}%` }}>
                 {month.label}
               </span>
             ))}
@@ -339,11 +392,13 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
             </div>
 
             <div
-              className="grid"
+              className="grid min-w-0 flex-1"
               style={{
                 gridAutoFlow: "column",
                 gridTemplateRows: `repeat(7, ${CELL}px)`,
-                gap: CELL_GAP,
+                gridTemplateColumns: `repeat(${HEATMAP_WEEKS}, ${CELL}px)`,
+                rowGap: CELL_GAP,
+                justifyContent: "space-between",
               }}
             >
               {weeks.flatMap((column) =>
@@ -353,8 +408,11 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
                   ) : (
                     <span
                       key={cell.date}
-                      title={`${formatDate(cell.date, true)} · ${formatDuration(cell.workingMs)}${cell.turnCount > 0 ? ` · ${cell.turnCount} turns` : ""}`}
-                      className="transition-opacity duration-100 ease-out hover:opacity-70"
+                      aria-label={`${formatDate(cell.date, true)}, ${formatDuration(cell.workingMs)}${cell.turnCount > 0 ? `, ${cell.turnCount} turns` : ""}`}
+                      onMouseEnter={(event) => showCellTooltip(event.currentTarget, event.currentTarget.getAttribute("aria-label") ?? "")}
+                      onMouseMove={(event) => showCellTooltip(event.currentTarget, event.currentTarget.getAttribute("aria-label") ?? "", event.clientX, event.clientY - 10)}
+                      onMouseLeave={() => setHoveredCell(null)}
+                      className="wk-heat-cell transition-opacity duration-100 ease-out hover:opacity-70"
                       style={{ width: CELL, height: CELL, borderRadius: 2, backgroundColor: `var(--wk-l${levelOf(cell.workingMs)})` }}
                     />
                   ),
@@ -364,6 +422,12 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
           </div>
         </div>
       </div>
+      {hoveredCell ? (
+        <div role="tooltip" className="wk-graph-tooltip"
+          style={{ left: hoveredCell.x, top: hoveredCell.y, transform: "translate(-50%, -100%)" }}>
+          {hoveredCell.text}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -429,7 +493,13 @@ function DailyChart({ days }: { days: Day[] }) {
           ticks={scale.ticks}
           tickFormatter={(value: unknown) => (toMs(value) === 0 ? "0" : formatTight(toMs(value)))}
         />
-        <EvilBarChart.Tooltip formatter={(value: unknown) => formatDuration(toMs(value))} />
+        <EvilBarChart.Tooltip formatter={(value: unknown, _name: unknown, item: { payload?: { turns?: number } }) => (
+          <div className="flex min-w-40 items-center justify-between gap-4">
+            <span className="text-muted-foreground">Working time</span>
+            <span className="text-foreground font-medium tabular-nums">{formatDuration(toMs(value))}</span>
+            {item.payload?.turns ? <span className="text-muted-foreground">{item.payload.turns} turns</span> : null}
+          </div>
+        )} />
         <EvilBarChart.Bar dataKey="value" variant="default" radius={3} barProps={{ maxBarSize: 44 }} />
       </EvilBarChart>
     </div>
@@ -443,7 +513,7 @@ function Leaderboard({ rows, emptyLabel }: {
 }) {
   if (rows.length === 0) return <Empty>{emptyLabel}</Empty>;
   const data = rows.map((row) => ({
-    name: truncate(row.name, 14),
+    name: row.name,
     value: row.value,
     detail: row.detail ?? "",
   }));
@@ -466,7 +536,15 @@ function Leaderboard({ rows, emptyLabel }: {
           tickLine={false}
           axisLine={false}
           tickMargin={6}
+          tickFormatter={(value: unknown) => truncate(String(value), 14)}
         />
+        <EvilBarChart.Tooltip formatter={(value: unknown, _name: unknown, item: { payload?: { detail?: string } }) => (
+          <div className="flex min-w-36 items-center justify-between gap-4">
+            <span className="text-muted-foreground">Time</span>
+            <span className="text-foreground font-medium tabular-nums">{formatDuration(toMs(value))}</span>
+            {item.payload?.detail ? <span className="text-muted-foreground">{item.payload.detail}</span> : null}
+          </div>
+        )} />
         <EvilBarChart.Bar
           dataKey="value"
           variant="default"
@@ -495,7 +573,7 @@ function Rows({ items }: { items: Array<{ label: string; value: string; hint?: s
     <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
       {items.map((item) => (
         <div key={item.label} className="min-w-0">
-          <dt className="text-muted-foreground truncate text-[11px] leading-none opacity-70">{item.label}</dt>
+          <dt className="text-muted-foreground truncate text-[11px] leading-none opacity-70" data-wk-tooltip={item.label}>{item.label}</dt>
           <dd className="text-foreground mt-2 truncate text-[13px] leading-none font-medium tabular-nums">
             {item.value}
             {item.hint ? <span className="text-muted-foreground ml-1 font-normal text-[11px] opacity-70">{item.hint}</span> : null}
@@ -574,10 +652,11 @@ function Dashboard() {
 
   const agents = useMemo(() => {
     if (!data) return [];
-    const byProvider = new Map<string, { runtimeMs: number; turns: number; unattributed: boolean }>();
+    const byProvider = new Map<string, { providerId: string; runtimeMs: number; turns: number; unattributed: boolean }>();
     for (const row of data.models) {
       const name = providerLabel(row.providerId);
       const entry = byProvider.get(name) ?? {
+        providerId: row.providerId,
         runtimeMs: 0,
         turns: 0,
         unattributed: isUnknown(row.providerId),
@@ -589,6 +668,7 @@ function Dashboard() {
     return [...byProvider.entries()]
       .map(([name, entry]) => ({
         name,
+        providerId: entry.providerId,
         value: entry.runtimeMs,
         detail: entry.unattributed ? `${entry.turns} older turns` : `${entry.turns} turns`,
         unattributed: entry.unattributed,
@@ -608,7 +688,7 @@ function Dashboard() {
 
   return (
     <main className="h-full overflow-y-auto" data-wk-root>
-      <div className="mx-auto w-full max-w-4xl space-y-3 p-4 md:p-5">
+      <div className="wk-dashboard-shell w-full space-y-3 p-4 md:p-5">
         <header className="flex justify-end">
           <div
             className="bg-muted flex shrink-0 items-center gap-0.5 rounded-lg p-0.5"
@@ -665,7 +745,9 @@ function Dashboard() {
             ) : null}
 
             <section className="bg-card border-border min-w-0 rounded-xl border p-4">
-              <p className="text-muted-foreground text-[11px] leading-none opacity-80">bb worked {rangeBlurb}</p>
+              <p className="text-muted-foreground flex items-center gap-1.5 text-[11px] leading-none opacity-80">
+                <Icon name="sparkles" className="size-3.5" /> bb worked {rangeBlurb}
+              </p>
               <p className="text-foreground mt-2.5 flex items-baseline gap-1.5 text-[40px] leading-none font-semibold tracking-tight tabular-nums">
                 {heroParts.map((part) => (
                   <span key={part.unit}>
@@ -684,22 +766,27 @@ function Dashboard() {
             <section className="grid grid-cols-2 gap-3 md:grid-cols-4" aria-label="Highlights">
               <Metric
                 label="Agent time"
+                icon="clock"
                 value={formatDuration(data.agentRuntimeMs)}
                 detail={data.agentRuntimeMs > data.workingMs ? "beats the clock" : "summed turn time"}
               />
               <Metric
                 label="Busiest agent"
+                icon="agent"
                 value={topAgent ? topAgent.name : "—"}
+                logo={topAgent ? <ProviderLogo providerId={topAgent.providerId} label={topAgent.name} /> : undefined}
                 detail={topAgent ? formatDuration(topAgent.value) : "nothing attributed"}
               />
               <Metric
                 label="Peak swarm"
+                icon="activity"
                 value={String(data.concurrency.peakConcurrentTurns)}
                 unit="×"
                 detail={`${data.concurrency.averageConcurrentTurns.toFixed(1)}× average`}
               />
               <Metric
                 label="Streak"
+                icon="flame"
                 value={String(data.streak.currentDays)}
                 unit={data.streak.currentDays === 1 ? "day" : "days"}
                 detail={`best ${data.streak.longestDays}`}
@@ -712,15 +799,15 @@ function Dashboard() {
               </Card>
             ) : null}
 
-            <Card title="Daily activity" note="Union of active thread time, per day">
+            <Card title="Daily activity" note="Union of active thread time, per day" icon="activity">
               <DailyChart days={data.days} />
             </Card>
 
             <div className="grid items-start gap-3 md:grid-cols-2">
-              <Card title="Busiest agents" note="Summed turn duration per provider">
+              <Card title="Busiest agents" note="Summed turn duration per provider" icon="agent">
                 <Leaderboard rows={agents.slice(0, 5)} emptyLabel="No agent turns attributed yet." />
               </Card>
-              <Card title="Projects" note="Union of active thread time per project">
+              <Card title="Projects" note="Union of active thread time per project" icon="project">
                 <Leaderboard
                   rows={data.projects.slice(0, 5).map((row) => ({
                     name: dimensionLabel(row.name, "project"),
@@ -732,7 +819,7 @@ function Dashboard() {
             </div>
 
             <div className="grid gap-3 md:grid-cols-2">
-              <Card title="Top models" note="Summed turn duration per model">
+              <Card title="Top models" note="Summed turn duration per model" icon="model">
                 {data.models.length === 0 ? (
                   <Empty>No model attribution yet.</Empty>
                 ) : (
@@ -745,8 +832,11 @@ function Dashboard() {
                       .map((row) => (
                         <li key={`${row.providerId}-${row.model}`} className="flex items-center justify-between gap-3 py-2">
                           <div className="flex min-w-0 items-center gap-2">
-                            <span className="text-foreground truncate text-[13px] font-medium">{shortModel(row.model)}</span>
-                            <span className="text-muted-foreground shrink-0 text-[11px] opacity-70">{providerLabel(row.providerId)}</span>
+                            <ProviderLogo providerId={row.providerId} />
+                            <span className="text-foreground truncate text-[13px] font-medium"
+                              data-wk-tooltip={shortModel(row.model)} tabIndex={0}>{shortModel(row.model)}</span>
+                            <span className="text-muted-foreground shrink-0 text-[11px] opacity-70"
+                              data-wk-tooltip={providerLabel(row.providerId)}>{providerLabel(row.providerId)}</span>
                           </div>
                           <span className="text-foreground shrink-0 text-[13px] font-medium tabular-nums">{formatDuration(row.agentRuntimeMs)}</span>
                         </li>
@@ -755,7 +845,7 @@ function Dashboard() {
                 )}
               </Card>
 
-              <Card title="Rhythm">
+              <Card title="Rhythm" icon="clock">
                 <Rows items={[
                   { label: "Typical turn", value: formatDuration(data.pace.medianTurnMs) },
                   { label: "Slowest 10%", value: formatDuration(data.pace.p90TurnMs) },
@@ -771,7 +861,7 @@ function Dashboard() {
             </div>
 
             {data.machines.length > 0 ? (
-              <Card title="Machines" note="Union of active thread time per machine">
+              <Card title="Machines" note="Union of active thread time per machine" icon="machine">
                 <ul className="flex flex-wrap gap-2">
                   {data.machines.slice(0, 6).map((row) => (
                     <li
@@ -783,7 +873,8 @@ function Dashboard() {
                         className="size-1.5 shrink-0 rounded-full"
                         style={{ backgroundColor: "var(--wk-machine-dot)" }}
                       />
-                      <span className="text-foreground truncate text-[13px] font-medium">
+                      <span className="text-foreground truncate text-[13px] font-medium"
+                        data-wk-tooltip={dimensionLabel(row.name, "machine")} tabIndex={0}>
                         {dimensionLabel(row.name, "machine")}
                       </span>
                       <span className="text-muted-foreground shrink-0 text-[11px] tabular-nums opacity-70">
