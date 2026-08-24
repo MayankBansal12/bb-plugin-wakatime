@@ -448,7 +448,12 @@ export default async function plugin(bb: BbPluginApi) {
       projects: analytics.projects.map((row) => ({ ...row, activeMs: row.workingMs })),
       machines: analytics.machines.map((row) => ({ ...row, activeMs: row.workingMs })),
       models: analytics.models.map((row) => ({
-        ...row, computeMs: row.agentRuntimeMs, sampledTurnCount: row.observedTurnCount,
+        providerId: row.providerId,
+        model: row.model,
+        agentRuntimeMs: row.agentRuntimeMs,
+        computeMs: row.agentRuntimeMs,
+        turnCount: row.turnCount,
+        sampledTurnCount: row.observedTurnCount,
       })),
       projectModels: analytics.projectModels,
       concurrency: {
