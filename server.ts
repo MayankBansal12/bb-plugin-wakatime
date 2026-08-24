@@ -1,58 +1,83 @@
-// bb-plugin-wakatime — time tracking for bb, like WakaTime for IDEs.
-//
-// Canonical interval model: `sessions` (thread active periods) and `turns`
-// (per-turn model attribution) are the source of truth. All aggregates are
-// computed from intervals at query time; a crash leaves an open interval
-// that startup reconciliation adopts or closes.
-//
-// Concurrency: every mutation for a thread runs through a per-thread mutex,
-// so activate/deactivate/poll never interleave. Polling drains events and
-// commits cursor + interval changes together; one poll per thread at a time.
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import {
+  aggregateAnalytics,
+  crashRecoveryEnd,
+  rangeStart,
+  type RangeKey,
+  type SessionInterval,
+  type TurnInterval,
+} from "./analytics.js";
+import {
+  planTurnEventBatch,
+  persistPlannedBatch,
+  type CollectorCursor,
+  type TurnLifecycleEvent,
+} from "./collector.js";
 
 const POLL_MS = 10_000;
+const HEARTBEAT_MS = 30_000;
+const HEARTBEAT_GRACE_MS = 90_000;
+
+const breakdownSchema = z
+  .object({ name: z.string(), workingMs: z.number(), activeMs: z.number() })
+  .strict();
+const summaryOutputSchema = z
+  .object({
+    range: z
+      .object({ key: z.enum(["today", "7d", "30d", "all"]), from: z.number(), to: z.number(), timezone: z.string() })
+      .strict(),
+    generatedAt: z.number(),
+    workingMs: z.number(), agentRuntimeMs: z.number(), agentCoverageMs: z.number(),
+    totalActiveMs: z.number(), totalComputeMs: z.number(), turnCount: z.number(),
+    days: z.array(z.object({
+      date: z.string(), workingMs: z.number(), agentRuntimeMs: z.number(),
+      agentCoverageMs: z.number(), activeMs: z.number(), computeMs: z.number(),
+      coverageMs: z.number(), turnCount: z.number(), peakConcurrentTurns: z.number(),
+    }).strict()),
+    projects: z.array(breakdownSchema), machines: z.array(breakdownSchema),
+    models: z.array(z.object({
+      providerId: z.string(), model: z.string(), agentRuntimeMs: z.number(),
+      computeMs: z.number(), turnCount: z.number(), sampledTurnCount: z.number(),
+    }).strict()),
+    projectModels: z.array(z.object({
+      projectName: z.string(), providerId: z.string(), model: z.string(),
+      agentRuntimeMs: z.number(), turnCount: z.number(),
+    }).strict()),
+    concurrency: z.object({
+      averageConcurrentTurns: z.number(), peakConcurrentTurns: z.number(),
+      swarmTimeMs: z.number(),
+      distribution: z.array(z.object({ concurrentTurns: z.number(), durationMs: z.number() }).strict()),
+    }).strict(),
+    pace: z.object({
+      coveredWorkingMs: z.number(), coveragePercent: z.number(), idleRunwayMs: z.number(),
+      longestIdleRunwayMs: z.number(), medianTurnMs: z.number(), p90TurnMs: z.number(),
+      turnsPerActiveHour: z.number(),
+    }).strict(),
+    streak: z.object({
+      currentDays: z.number(), longestDays: z.number(),
+      busiestDay: z.object({ date: z.string(), workingMs: z.number() }).strict().nullable(),
+    }).strict(),
+    quality: z.object({
+      sessionCount: z.number(), openSessionCount: z.number(), recoveredSessionCount: z.number(),
+      sampledTurnCount: z.number(), recoveredTurnCount: z.number(), unknownModelTurnCount: z.number(),
+      linkedProjectModelTurnCount: z.number(),
+    }).strict(),
+  })
+  .strict();
 
 export const rpcContract = defineRpcContract({
   getSummary: {
-    input: z
-      .object({
-        range: z.enum(["today", "7d", "30d", "all"]),
-      })
-      .strict(),
-    output: z
-      .object({
-        totalActiveMs: z.number(),
-        totalComputeMs: z.number(),
-        turnCount: z.number(),
-        days: z.array(
-          z.object({ date: z.string(), activeMs: z.number(), computeMs: z.number() }),
-        ),
-        projects: z.array(z.object({ name: z.string(), activeMs: z.number() })),
-        machines: z.array(z.object({ name: z.string(), activeMs: z.number() })),
-        models: z.array(
-          z.object({
-            model: z.string(),
-            providerId: z.string(),
-            computeMs: z.number(),
-            turnCount: z.number(),
-          }),
-        ),
-      })
-      .strict(),
+    input: z.object({ range: z.enum(["today", "7d", "30d", "all"]) }).strict(),
+    output: summaryOutputSchema,
   },
 });
 
-interface OpenSession {
-  id: number;
-  threadId: string;
-  startedAt: number;
-}
-
-interface ThreadCursor {
-  lastSeq: number;
-  openTurnId: string | null;
-  openTurnStartedAt: number;
+interface OpenSession { id: number; threadId: string; startedAt: number }
+interface ThreadSnapshot {
+  projectId: string | null; projectName: string | null;
+  hostId: string | null; machineName: string | null;
+  providerId: string; model: string;
 }
 
 export default async function plugin(bb: BbPluginApi) {
@@ -92,676 +117,412 @@ export default async function plugin(bb: BbPluginApi) {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS session_metadata (
+      session_id INTEGER PRIMARY KEY,
+      project_id TEXT,
+      host_id TEXT,
+      quality TEXT NOT NULL DEFAULT 'legacy-unknown',
+      closure_reason TEXT NOT NULL DEFAULT 'legacy-unknown'
+    )`,
+    `CREATE TABLE IF NOT EXISTS turn_metadata (
+      turn_row_id INTEGER PRIMARY KEY,
+      attribution_quality TEXT NOT NULL DEFAULT 'legacy-unknown',
+      closure_reason TEXT NOT NULL DEFAULT 'legacy-unknown'
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_session_metadata_project ON session_metadata(project_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_turn_metadata_quality ON turn_metadata(attribution_quality)`,
   ]);
 
-  // Heartbeat: lets crash recovery bound downtime attribution instead of
-  // charging everything between crash and restart as active time.
-  const HEARTBEAT_GRACE_MS = 90_000;
-  const setHeartbeat = db.prepare(
-    `INSERT INTO meta (key, value) VALUES ('last_alive', ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-  );
-  const getHeartbeat = db.prepare(
-    `SELECT value FROM meta WHERE key = 'last_alive'`,
-  );
-  function lastAliveMs(): number {
-    const row = getHeartbeat.get() as { value: string } | undefined;
-    return row ? Number(row.value) : processStart;
+  // v0.1 used project_id/machine_id columns. Keep its table and every row;
+  // nullable display columns are a safe additive compatibility migration.
+  const sessionColumns = db.prepare(`PRAGMA table_info(sessions)`).all() as { name: string }[];
+  if (!sessionColumns.some((column) => column.name === "project_name")) {
+    db.exec(`ALTER TABLE sessions ADD COLUMN project_name TEXT`);
   }
-  /**
-   * The timestamp at which we can assume the process stopped observing.
-   * Bounded by the last heartbeat plus grace, never in the future.
-   */
-  function staleEnd(now: number): number {
-    return Math.min(now, Math.max(lastAliveMs(), processStart) + HEARTBEAT_GRACE_MS);
+  if (!sessionColumns.some((column) => column.name === "machine_name")) {
+    db.exec(`ALTER TABLE sessions ADD COLUMN machine_name TEXT`);
   }
 
-  // One-off migration from the v0.1 schema (project_id/machine_id columns).
-  {
-    const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as {
-      name: string;
-    }[];
-    if (cols.length > 0 && !cols.some((c) => c.name === "project_name")) {
-      db.transaction(() => {
-        // Indexes follow the renamed table — drop them first so they can be
-        // recreated against the new table.
-        db.exec(
-          `DROP INDEX IF EXISTS idx_sessions_started;
-           DROP INDEX IF EXISTS idx_sessions_ended;
-           DROP INDEX IF EXISTS idx_sessions_open;
-           ALTER TABLE sessions RENAME TO sessions_v01;
-           CREATE TABLE sessions (
-             id INTEGER PRIMARY KEY AUTOINCREMENT,
-             thread_id TEXT NOT NULL,
-             project_name TEXT,
-             machine_name TEXT,
-             started_at INTEGER NOT NULL,
-             ended_at INTEGER
-           );`,
-        );
-        db.exec(
-          `CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
-           CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at);
-           CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_open
-             ON sessions(thread_id) WHERE ended_at IS NULL;
-           INSERT INTO sessions (thread_id, started_at, ended_at)
-             SELECT thread_id, started_at, ended_at FROM sessions_v01 WHERE ended_at IS NOT NULL;
-           DROP TABLE sessions_v01;`,
-        );
-      })();
-      bb.log.info("migrated v0.1 sessions table");
+  const statements = {
+    openSession: db.prepare(`INSERT INTO sessions
+      (thread_id, project_name, machine_name, started_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(thread_id) WHERE ended_at IS NULL DO NOTHING`),
+    findOpenSession: db.prepare(`SELECT id, started_at FROM sessions
+      WHERE thread_id = ? AND ended_at IS NULL`),
+    sessionMetadata: db.prepare(`INSERT INTO session_metadata
+      (session_id, project_id, host_id, quality, closure_reason)
+      VALUES (?, ?, ?, 'observed', 'open') ON CONFLICT(session_id) DO UPDATE SET
+      project_id = COALESCE(session_metadata.project_id, excluded.project_id),
+      host_id = COALESCE(session_metadata.host_id, excluded.host_id)`),
+    closeSession: db.prepare(`UPDATE sessions SET ended_at = MAX(started_at, ?)
+      WHERE id = ? AND ended_at IS NULL`),
+    closeSessionMetadata: db.prepare(`UPDATE session_metadata SET closure_reason = ?
+      WHERE session_id = ?`),
+    listOpenSessions: db.prepare(`SELECT id, thread_id, started_at FROM sessions
+      WHERE ended_at IS NULL`),
+    insertTurn: db.prepare(`INSERT INTO turns
+      (thread_id, turn_id, session_id, provider_id, model, started_at)
+      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(thread_id, turn_id) DO NOTHING`),
+    findTurn: db.prepare(`SELECT id FROM turns WHERE thread_id = ? AND turn_id = ?`),
+    turnMetadata: db.prepare(`INSERT INTO turn_metadata
+      (turn_row_id, attribution_quality, closure_reason) VALUES (?, ?, 'open')
+      ON CONFLICT(turn_row_id) DO NOTHING`),
+    openTurnRows: db.prepare(`SELECT id FROM turns WHERE thread_id = ? AND ended_at IS NULL`),
+    ensureTurnClosure: db.prepare(`INSERT INTO turn_metadata
+      (turn_row_id, attribution_quality, closure_reason) VALUES (?, 'legacy-unknown', ?)
+      ON CONFLICT(turn_row_id) DO UPDATE SET closure_reason = excluded.closure_reason`),
+    ensureSessionClosure: db.prepare(`INSERT INTO session_metadata
+      (session_id, quality, closure_reason) VALUES (?, 'legacy-unknown', ?)
+      ON CONFLICT(session_id) DO UPDATE SET closure_reason = excluded.closure_reason`),
+    closeOpenTurns: db.prepare(`UPDATE turns SET ended_at = MAX(started_at, ?)
+      WHERE thread_id = ? AND ended_at IS NULL`),
+    closeOpenTurnMetadata: db.prepare(`UPDATE turn_metadata SET closure_reason = ?
+      WHERE turn_row_id IN (SELECT id FROM turns WHERE thread_id = ? AND ended_at IS NOT NULL)
+        AND closure_reason = 'open'`),
+    findOpenTurn: db.prepare(`SELECT turn_id, started_at FROM turns
+      WHERE thread_id = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1`),
+    getCursor: db.prepare(`SELECT last_seq FROM poll_cursors WHERE thread_id = ?`),
+    setCursor: db.prepare(`INSERT INTO poll_cursors (thread_id, last_seq) VALUES (?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET last_seq = MAX(poll_cursors.last_seq, excluded.last_seq)`),
+    setHeartbeat: db.prepare(`INSERT INTO meta (key, value) VALUES ('last_alive', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value`),
+    getHeartbeat: db.prepare(`SELECT value FROM meta WHERE key = 'last_alive'`),
+  };
+
+  const persistedHeartbeat = (() => {
+    const row = statements.getHeartbeat.get() as { value: string } | undefined;
+    if (!row) return null;
+    const value = Number(row.value);
+    return Number.isFinite(value) ? Math.min(value, processStart) : null;
+  })();
+
+  const openSessions = new Map<string, OpenSession>();
+  const cursors = new Map<string, CollectorCursor>();
+  const locks = new Map<string, Promise<void>>();
+  const pollers = new Map<string, ReturnType<typeof setInterval>>();
+
+  function markOpenTurnClosures(threadId: string, reason: string) {
+    for (const row of statements.openTurnRows.all(threadId) as { id: number }[]) {
+      statements.ensureTurnClosure.run(row.id, reason);
     }
   }
 
-  const stmts = {
-    openSession: db.prepare(
-      `INSERT INTO sessions (thread_id, project_name, machine_name, started_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(thread_id) WHERE ended_at IS NULL DO NOTHING`,
-    ),
-    closeSessionByThread: db.prepare(
-      `UPDATE sessions SET ended_at = ? WHERE thread_id = ? AND ended_at IS NULL`,
-    ),
-    closeSessionById: db.prepare(
-      `UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL`,
-    ),
-    listOpenSessions: db.prepare(
-      `SELECT id, thread_id, started_at FROM sessions WHERE ended_at IS NULL`,
-    ),
-    insertTurn: db.prepare(
-      `INSERT INTO turns (thread_id, turn_id, session_id, provider_id, model, started_at)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(thread_id, turn_id) DO NOTHING`,
-    ),
-    closeOpenTurnsBefore: db.prepare(
-      `UPDATE turns SET ended_at = ?
-         WHERE thread_id = ? AND ended_at IS NULL AND started_at <= ?`,
-    ),
-    forceCloseOpenTurns: db.prepare(
-      `UPDATE turns SET ended_at = ?
-         WHERE thread_id = ? AND ended_at IS NULL`,
-    ),
-    closeAllOpenSessions: db.prepare(
-      `UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL`,
-    ),
-    forceCloseAllOpenTurns: db.prepare(
-      `UPDATE turns SET ended_at = ? WHERE ended_at IS NULL`,
-    ),
-    getCursor: db.prepare(`SELECT last_seq FROM poll_cursors WHERE thread_id = ?`),
-    setCursor: db.prepare(
-      `INSERT INTO poll_cursors (thread_id, last_seq) VALUES (?, ?)
-       ON CONFLICT(thread_id) DO UPDATE SET last_seq = excluded.last_seq`,
-    ),
-    deleteCursor: db.prepare(`DELETE FROM poll_cursors WHERE thread_id = ?`),
-  };
-
-  interface SessionMeta {
-    projectName: string | null;
-    machineName: string | null;
-  }
-  const sessionMeta = new Map<number, SessionMeta>();
-  const openSessions = new Map<string, OpenSession>();
-  const cursors = new Map<string, ThreadCursor>();
-  const locks = new Map<string, Promise<void>>();
-  const polling = new Set<string>();
-
-  /** Serialize all mutations for one thread. */
-  function withLock(threadId: string, fn: () => Promise<unknown>): Promise<void> {
-    const prev = locks.get(threadId) ?? Promise.resolve();
-    const next = prev.then(fn, fn).then(
-      () => undefined,
-      () => undefined,
-    );
+  function withLock(threadId: string, work: () => Promise<unknown>): Promise<void> {
+    const previous = locks.get(threadId) ?? Promise.resolve();
+    const next = previous.then(work, work).then(() => undefined, () => undefined);
     locks.set(threadId, next);
     return next;
   }
 
-  function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  function sleep(ms: number, signal: AbortSignal): Promise<void> {
     return new Promise((resolve) => {
-      const t = setTimeout(done, ms);
-      function done() {
-        clearTimeout(t);
-        signal?.removeEventListener("abort", done);
-        resolve();
-      }
-      signal?.addEventListener("abort", done, { once: true });
+      const timer = setTimeout(done, ms);
+      function done() { clearTimeout(timer); signal.removeEventListener("abort", done); resolve() }
+      signal.addEventListener("abort", done, { once: true });
     });
   }
 
-  async function snapshotThread(threadId: string) {
+  async function snapshotThread(threadId: string): Promise<ThreadSnapshot> {
     let projectId: string | null = null;
     let hostId: string | null = null;
+    let providerId = "Unknown";
     let model = "unknown";
-    let providerId = "unknown";
     try {
-      const t = await bb.sdk.threads.get({ threadId });
-      projectId = t.projectId ?? null;
-      if (typeof t.providerId === "string" && t.providerId)
-        providerId = t.providerId;
-      const envHost =
-        (t as { environment?: { hostId?: string } }).environment?.hostId ?? null;
-      if (envHost) {
-        hostId = envHost;
-      } else if (t.environmentId) {
+      const thread = await bb.sdk.threads.get({ threadId });
+      projectId = thread.projectId ?? null;
+      providerId = thread.providerId || "Unknown";
+      if (thread.environmentId) {
         try {
-          const env = await bb.sdk.environments.get({
-            environmentId: t.environmentId,
-          });
-          hostId = env.hostId ?? null;
-        } catch {
-          /* leave unknown */
-        }
+          const environment = await bb.sdk.environments.get({ environmentId: thread.environmentId });
+          hostId = environment.hostId ?? null;
+        } catch { /* attribution remains unknown rather than guessed */ }
       }
-    } catch {
-      /* thread gone */
-    }
+    } catch { /* the interval remains measurable without dimensions */ }
     try {
-      const opts = await bb.sdk.threads.defaultExecutionOptions({ threadId });
-      if (opts?.model) model = opts.model;
-    } catch {
-      /* keep defaults */
-    }
+      const options = await bb.sdk.threads.defaultExecutionOptions({ threadId });
+      if (options?.model) model = options.model;
+    } catch { /* keep the explicit unknown bucket */ }
+
     let projectName: string | null = null;
     if (projectId) {
-      try {
-        const p = await bb.sdk.projects.get({ projectId });
-        projectName = p.name ?? projectId;
-      } catch {
-        try {
-          const all = await bb.sdk.projects.list({ includePersonal: true });
-          const hit = all.find((x) => x.id === projectId);
-          projectName = hit?.name ?? projectId;
-        } catch {
-          projectName = projectId;
-        }
-      }
+      try { projectName = (await bb.sdk.projects.get({ projectId })).name ?? projectId }
+      catch { projectName = projectId }
     }
     let machineName: string | null = null;
     if (hostId) {
-      try {
-        const h = await bb.sdk.hosts.get({ hostId });
-        machineName = h.name ?? hostId;
-      } catch {
-        machineName = hostId;
-      }
+      try { machineName = (await bb.sdk.hosts.get({ hostId })).name ?? hostId }
+      catch { machineName = hostId }
     }
-    return { projectName, machineName, model, providerId };
+    return { projectId, projectName, hostId, machineName, providerId, model };
   }
 
-  /**
-   * Open a session for a thread. `at` is the lifecycle timestamp captured at
-   * event time so slow SDK lookups don't shift the interval start.
-   */
+  const closeThreadIntervals = db.transaction((threadId: string, at: number, reason: string) => {
+    const cached = openSessions.get(threadId);
+    const stored = statements.findOpenSession.get(threadId) as
+      | { id: number; started_at: number } | undefined;
+    const session = cached ?? (stored ? { id: stored.id, threadId, startedAt: stored.started_at } : undefined);
+    markOpenTurnClosures(threadId, reason);
+    statements.closeOpenTurns.run(at, threadId);
+    statements.closeOpenTurnMetadata.run(reason, threadId);
+    if (session) {
+      statements.ensureSessionClosure.run(session.id, reason);
+      statements.closeSession.run(at, session.id);
+      statements.closeSessionMetadata.run(reason, session.id);
+    }
+  });
+
   async function markActive(threadId: string, at: number) {
     await withLock(threadId, async () => {
       if (openSessions.has(threadId)) return;
-      const meta = await snapshotThread(threadId);
-      if (openSessions.has(threadId)) return; // re-check under lock
-      const res = stmts.openSession.run(
-        threadId,
-        meta.projectName,
-        meta.machineName,
-        at,
-      );
-      if (res.changes === 0) {
-        // An open row already exists (crash recovery didn't reach us yet).
-        const row = db
-          .prepare(
-            `SELECT id, started_at FROM sessions WHERE thread_id = ? AND ended_at IS NULL`,
-          )
-          .get(threadId) as { id: number; started_at: number } | undefined;
-        if (row)
-          openSessions.set(threadId, {
-            id: row.id,
-            threadId,
-            startedAt: row.started_at,
-          });
-        startPolling(threadId);
-        return;
-      }
-      openSessions.set(threadId, {
-        id: Number(res.lastInsertRowid),
-        threadId,
-        startedAt: at,
-      });
+      const snapshot = await snapshotThread(threadId);
+      const session = db.transaction(() => {
+        const result = statements.openSession.run(threadId, snapshot.projectName, snapshot.machineName, at);
+        const row = result.changes > 0
+          ? { id: Number(result.lastInsertRowid), started_at: at }
+          : statements.findOpenSession.get(threadId) as { id: number; started_at: number };
+        statements.sessionMetadata.run(row.id, snapshot.projectId, snapshot.hostId);
+        return { id: row.id, threadId, startedAt: row.started_at };
+      })();
+      openSessions.set(threadId, session);
       startPolling(threadId);
-    });
-  }
-
-  function markInactive(threadId: string, at: number) {
-    return withLock(threadId, async () => {
-      if (!openSessions.has(threadId)) return;
-      // Final drain so turns completed since the last poll are not lost.
       await drainEvents(threadId);
-      stmts.forceCloseOpenTurns.run(at, threadId);
-      stmts.closeSessionByThread.run(at, threadId);
-      openSessions.delete(threadId);
-      stopPolling(threadId);
-      // Cursor is retained durably so reactivation doesn't replay history.
     });
-  }
-
-  function forgetThread(threadId: string) {
-    return withLock(threadId, async () => {
-      await drainEvents(threadId);
-      const now = Date.now();
-      stmts.forceCloseOpenTurns.run(now, threadId);
-      stmts.closeSessionByThread.run(now, threadId);
-      openSessions.delete(threadId);
-      stopPolling(threadId);
-      cursors.delete(threadId);
-      stmts.deleteCursor.run(threadId);
-    });
-  }
-
-  // ---- event polling -----------------------------------------------------
-  const pollers = new Map<string, ReturnType<typeof setInterval>>();
-
-  function startPolling(threadId: string) {
-    if (pollers.has(threadId)) return;
-    const timer = setInterval(() => {
-      void withLock(threadId, () => drainEvents(threadId));
-    }, POLL_MS);
-    pollers.set(threadId, timer);
   }
 
   function stopPolling(threadId: string) {
-    const t = pollers.get(threadId);
-    if (t) clearInterval(t);
+    const poller = pollers.get(threadId);
+    if (poller) clearInterval(poller);
     pollers.delete(threadId);
   }
+  function startPolling(threadId: string) {
+    if (pollers.has(threadId)) return;
+    pollers.set(threadId, setInterval(
+      () => void withLock(threadId, () => drainEvents(threadId)), POLL_MS,
+    ));
+  }
 
-  /**
-   * Drain new thread events and record turn intervals. Runs under the thread
-   * lock; guarded against overlapping execution from reconcile paths.
-   */
   async function drainEvents(threadId: string) {
-    if (polling.has(threadId)) return;
-    polling.add(threadId);
-    try {
-      let cursor = cursors.get(threadId);
-      if (!cursor) {
-        const row = stmts.getCursor.get(threadId) as
-          | { last_seq: number }
-          | undefined;
-        cursor = { lastSeq: row?.last_seq ?? 0, openTurnId: null, openTurnStartedAt: 0 };
-        const openTurn = db
-          .prepare(
-            `SELECT turn_id, started_at FROM turns
-               WHERE thread_id = ? AND ended_at IS NULL LIMIT 1`,
-          )
-          .get(threadId) as { turn_id: string; started_at: number } | undefined;
-        if (openTurn) {
-          cursor.openTurnId = openTurn.turn_id;
-          cursor.openTurnStartedAt = openTurn.started_at;
-        }
-        cursors.set(threadId, cursor);
-      }
-
-      const events = await bb.sdk.threads.events.list({
-        threadId,
-        types: ["turn/started", "turn/completed"],
-        order: "asc",
-        ...(cursor.lastSeq > 0 ? { afterSeq: String(cursor.lastSeq) } : {}),
-      });
-
-      const session = openSessions.get(threadId);
-
-      for (const ev of events) {
-        if (ev.seq <= cursor.lastSeq) continue;
-        cursor.lastSeq = ev.seq;
-        // Start-event sequence is the canonical turn identity: replay-safe
-        // and unique per thread, unlike provider turn ids which can repeat.
-        const evTurnId = String(ev.seq);
-
-        if (ev.type === "turn/started") {
-          if (cursor.openTurnId) {
-            // Missed completion — close the previous interval conservatively.
-            stmts.closeOpenTurnsBefore.run(ev.createdAt, threadId, ev.createdAt);
-          }
-          // Historical replays can't know which model was live then; only
-          // attribute a model to turns that started while we are running.
-          const live = ev.createdAt >= processStart - POLL_MS;
-          const meta = live
-            ? await snapshotThread(threadId)
-            : { model: "unknown", providerId: "" };
-          cursor.openTurnId = evTurnId;
-          cursor.openTurnStartedAt = ev.createdAt;
-          stmts.insertTurn.run(
-            threadId,
-            evTurnId,
-            session?.id ?? null,
-            meta.providerId || "",
-            meta.model,
-            ev.createdAt,
-          );
-        } else if (ev.type === "turn/completed") {
-          if (!cursor.openTurnId) {
-            // Crash mid-turn: recover the stored open interval.
-            const openTurn = db
-              .prepare(
-                `SELECT turn_id, started_at FROM turns
-                   WHERE thread_id = ? AND ended_at IS NULL LIMIT 1`,
-              )
-              .get(threadId) as { turn_id: string; started_at: number } | undefined;
-            if (openTurn) {
-              cursor.openTurnId = openTurn.turn_id;
-              cursor.openTurnStartedAt = openTurn.started_at;
-            }
-          }
-          if (cursor.openTurnId) {
-            const end = Math.max(ev.createdAt, cursor.openTurnStartedAt);
-            stmts.closeOpenTurnsBefore.run(end, threadId, end);
-            cursor.openTurnId = null;
-            cursor.openTurnStartedAt = 0;
-          }
-        }
-      }
-      stmts.setCursor.run(threadId, cursor.lastSeq);
-    } catch (err) {
-      bb.log.warn(`poll error ${threadId}: ${String(err)}`);
-    } finally {
-      polling.delete(threadId);
-    }
-  }
-
-  // ---- startup reconciliation -------------------------------------------
-  async function reconcile() {
-    // Adopt or close persisted open sessions based on live status.
-    for (const row of stmts.listOpenSessions.all() as {
-      id: number;
-      thread_id: string;
-      started_at: number;
-    }[]) {
-      if (openSessions.has(row.thread_id)) continue;
-      try {
-        const t = await bb.sdk.threads.get({ threadId: row.thread_id });
-        if (t.status === "active") {
-          openSessions.set(row.thread_id, {
-            id: row.id,
-            threadId: row.thread_id,
-            startedAt: row.started_at,
-          });
-          startPolling(row.thread_id);
-        } else {
-          const end = Math.max(row.started_at, staleEnd(Date.now()));
-          stmts.forceCloseOpenTurns.run(end, row.thread_id);
-          stmts.closeSessionById.run(end, row.id);
-        }
-      } catch {
-        const end = Math.max(row.started_at, staleEnd(Date.now()));
-        stmts.forceCloseOpenTurns.run(end, row.thread_id);
-        stmts.closeSessionById.run(end, row.id);
-      }
-    }
-    // Discover running threads (including hidden/child).
-    try {
-      let offset = 0;
-      for (;;) {
-        const rows = await bb.sdk.threads.list({
-          limit: 100,
-          offset,
-          includeHidden: true,
-        });
-        for (const t of rows) {
-          if (t.status === "active") void markActive(t.id, Date.now());
-        }
-        offset += rows.length;
-        if (rows.length < 100 || offset > 5000) break;
-      }
-    } catch (err) {
-      bb.log.warn(`reconcile failed: ${String(err)}`);
-    }
-  }
-
-  // ---- lifecycle events --------------------------------------------------
-  bb.events.on("thread.active", ({ thread }) =>
-    void markActive(thread.id, Date.now()),
-  );
-  bb.events.on("thread.idle", ({ thread }) => void markInactive(thread.id, Date.now()));
-  bb.events.on("thread.failed", ({ thread }) => void markInactive(thread.id, Date.now()));
-  bb.events.on("thread.archived", ({ thread }) => void forgetThread(thread.id));
-  bb.events.on("thread.deleted", ({ thread }) => void forgetThread(thread.id));
-
-  // ---- aggregation ------------------------------------------------------
-  type Interval = { start: number; end: number };
-
-  function rangeStart(range: string, nowMs: number): number {
-    const now = new Date(nowMs);
-    if (range === "today") {
-      return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    }
-    if (range === "7d") return nowMs - 7 * 86_400_000;
-    if (range === "30d") return nowMs - 30 * 86_400_000;
-    return 0;
-  }
-
-  function unionMs(intervals: Interval[], from: number, to: number): number {
-    const clipped = intervals
-      .map((i) => ({
-        start: Math.max(i.start, from),
-        end: Math.min(i.end, to),
-      }))
-      .filter((i) => i.end > i.start)
-      .sort((a, b) => a.start - b.start);
-    let total = 0;
-    let curStart = -1;
-    let curEnd = -1;
-    for (const i of clipped) {
-      if (curStart < 0) {
-        curStart = i.start;
-        curEnd = i.end;
-      } else if (i.start <= curEnd) {
-        curEnd = Math.max(curEnd, i.end);
-      } else {
-        total += curEnd - curStart;
-        curStart = i.start;
-        curEnd = i.end;
-      }
-    }
-    if (curStart >= 0) total += curEnd - curStart;
-    return total;
-  }
-
-  /** Split [start,end) into per-local-calendar-day segments. */
-  function splitByDay(
-    start: number,
-    end: number,
-    into: Map<string, Interval[]>,
-  ): void {
-    let cur = start;
-    while (cur < end) {
-      const key = dayKey(cur);
-      const d = new Date(cur);
-      const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
-      const segEnd = Math.min(end, dayEnd);
-      if (!into.has(key)) into.set(key, []);
-      into.get(key)!.push({ start: cur, end: segEnd });
-      cur = segEnd;
-    }
-  }
-
-  function dayKey(ts: number): string {
-    const d = new Date(ts);
-    const p = (n: number) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-  }
-
-  function computeSummary(range: string) {
-    const to = Date.now();
-    const from = rangeStart(range, to);
-    const activeEnd = `(COALESCE(ended_at, ${to}))`;
-
-    const sessions = db
-      .prepare(
-        `SELECT id, project_name, machine_name, started_at,
-                ${activeEnd} AS ended
-           FROM sessions WHERE started_at < ? AND ${activeEnd} > ?`,
-      )
-      .all(to, from) as {
-      id: number;
-      project_name: string | null;
-      machine_name: string | null;
-      started_at: number;
-      ended: number;
-    }[];
-
-    const allIntervals: Interval[] = sessions.map((s) => ({
-      start: s.started_at,
-      end: s.ended,
-    }));
-    const totalActiveMs = unionMs(allIntervals, from, to);
-
-    const dayMap = new Map<string, Interval[]>();
-    const computeDayMap = new Map<string, Interval[]>();
-    for (const s of sessions) {
-      splitByDay(Math.max(s.started_at, from), Math.min(s.ended, to), dayMap);
-    }
-
-    const turns = db
-      .prepare(
-        `SELECT provider_id, model, started_at, ${activeEnd} AS ended
-           FROM turns WHERE started_at < ? AND ${activeEnd} > ?`,
-      )
-      .all(to, from) as {
-      provider_id: string;
-      model: string;
-      started_at: number;
-      ended: number;
-    }[];
-    const modelMap = new Map<
-      string,
-      { model: string; providerId: string; computeMs: number; turnCount: number }
-    >();
-    let totalComputeMs = 0;
-    for (const t of turns) {
-      // Clip to the requested range BEFORE splitting so totals, per-model
-      // sums, and daily buckets all agree on the same clipped intervals.
-      const start = Math.max(t.started_at, from);
-      const end = Math.min(t.ended, to);
-      if (end <= start) continue;
-      splitByDay(start, end, computeDayMap);
-      totalComputeMs += end - start;
-      const key = `${t.provider_id}/${t.model}`;
-      const m = modelMap.get(key) ?? {
-        model: t.model || "unknown",
-        providerId: t.provider_id || "unknown",
-        computeMs: 0,
-        turnCount: 0,
-      };
-      m.computeMs += end - start;
-      m.turnCount += 1;
-      modelMap.set(key, m);
-    }
-
-    const days = [...new Set([...dayMap.keys(), ...computeDayMap.keys()])]
-      .sort()
-      .map((date) => ({
-        date,
-        activeMs: unionMs(dayMap.get(date) ?? [], from, to),
-        computeMs: unionMs(computeDayMap.get(date) ?? [], from, to),
+    const durable = statements.getCursor.get(threadId) as { last_seq: number } | undefined;
+    const openTurn = statements.findOpenTurn.get(threadId) as
+      | { turn_id: string; started_at: number } | undefined;
+    const initial: CollectorCursor = {
+      lastSeq: durable?.last_seq ?? 0,
+      openTurnId: openTurn?.turn_id ?? null,
+      openTurnStartedAt: openTurn?.started_at ?? 0,
+    };
+    const events = await bb.sdk.threads.events.list({
+      threadId, types: ["turn/started", "turn/completed"], order: "asc", limit: "1000",
+      ...(initial.lastSeq > 0 ? { afterSeq: String(initial.lastSeq) } : {}),
+    });
+    const lifecycleEvents: TurnLifecycleEvent[] = events
+      .filter((event) => event.type === "turn/started" || event.type === "turn/completed")
+      .map((event) => ({
+        seq: event.seq,
+        type: event.type as TurnLifecycleEvent["type"],
+        createdAt: event.createdAt,
       }));
+    const planned = planTurnEventBatch(initial, lifecycleEvents);
+    if (planned.next.lastSeq === initial.lastSeq) { cursors.set(threadId, initial); return }
 
-    function dimUnion(get: (s: (typeof sessions)[number]) => string | null) {
-      const map = new Map<string, Interval[]>();
-      for (const s of sessions) {
-        const name = get(s) || "unknown";
-        if (!map.has(name)) map.set(name, []);
-        map.get(name)!.push({ start: s.started_at, end: s.ended });
+    const startMetadata = new Map<string, ThreadSnapshot>();
+    for (const operation of planned.operations) {
+      if (operation.kind === "start" && operation.startedAt >= processStart - POLL_MS) {
+        startMetadata.set(operation.turnId, await snapshotThread(threadId));
       }
-      return [...map.entries()]
-        .map(([name, ivs]) => ({ name, activeMs: unionMs(ivs, from, to) }))
-        .sort((a, b) => b.activeMs - a.activeMs);
     }
 
-    const cap = (ms: number) => Math.min(ms, Math.max(0, to - from));
+    const currentSession = openSessions.get(threadId);
+    const committedCursor = persistPlannedBatch(planned, {
+      transaction: (work) => db.transaction(work)(),
+      apply: (operation) => {
+        if (operation.kind === "close") {
+          markOpenTurnClosures(threadId, operation.reason);
+          statements.closeOpenTurns.run(operation.endedAt, threadId);
+          statements.closeOpenTurnMetadata.run(operation.reason, threadId);
+          return;
+        }
+        const snapshot = startMetadata.get(operation.turnId);
+        const belongsToCurrentSession = currentSession && operation.startedAt >= currentSession.startedAt;
+        statements.insertTurn.run(
+          threadId, operation.turnId, belongsToCurrentSession ? currentSession.id : null,
+          snapshot?.providerId ?? "", snapshot?.model ?? "unknown", operation.startedAt,
+        );
+        const turn = statements.findTurn.get(threadId, operation.turnId) as { id: number };
+        statements.turnMetadata.run(turn.id, snapshot ? "sampled-live" : "historical-unknown");
+      },
+      persistCursor: (lastSeq) => { statements.setCursor.run(threadId, lastSeq) },
+    });
+    cursors.set(threadId, committedCursor);
+  }
 
+  function markInactive(threadId: string, at: number, reason: string) {
+    return withLock(threadId, async () => {
+      try { await drainEvents(threadId) }
+      catch (error) { bb.log.warn(`final event drain failed for ${threadId}: ${String(error)}`) }
+      closeThreadIntervals(threadId, at, reason);
+      openSessions.delete(threadId);
+      stopPolling(threadId);
+    });
+  }
+
+  let recoveryComplete = false;
+  async function reconcile() {
+    if (!recoveryComplete) {
+      // Never bridge an unobserved restart gap, even for a still-active thread.
+      for (const row of statements.listOpenSessions.all() as {
+        id: number; thread_id: string; started_at: number;
+      }[]) {
+        const end = crashRecoveryEnd(row.started_at, persistedHeartbeat, processStart, HEARTBEAT_GRACE_MS);
+        db.transaction(() => {
+          markOpenTurnClosures(row.thread_id, "crash-recovery");
+          statements.closeOpenTurns.run(end, row.thread_id);
+          statements.closeOpenTurnMetadata.run("crash-recovery", row.thread_id);
+          statements.ensureSessionClosure.run(row.id, "crash-recovery");
+          statements.closeSession.run(end, row.id);
+          statements.closeSessionMetadata.run("crash-recovery", row.id);
+        })();
+      }
+      recoveryComplete = true;
+    }
+    let offset = 0;
+    for (;;) {
+      const rows = await bb.sdk.threads.list({ limit: 100, offset, includeHidden: true });
+      for (const thread of rows) if (thread.status === "active") void markActive(thread.id, Date.now());
+      offset += rows.length;
+      if (rows.length < 100 || offset >= 5000) break;
+    }
+  }
+
+  bb.events.on("thread.active", ({ thread }) => void markActive(thread.id, Date.now()));
+  bb.events.on("thread.idle", ({ thread }) => void markInactive(thread.id, Date.now(), "idle"));
+  bb.events.on("thread.failed", ({ thread }) => void markInactive(thread.id, Date.now(), "failed"));
+  bb.events.on("thread.archived", ({ thread }) => void markInactive(thread.id, Date.now(), "archived"));
+  bb.events.on("thread.deleted", ({ thread }) => void markInactive(thread.id, Date.now(), "deleted"));
+
+  function computeSummary(range: RangeKey) {
+    const to = Date.now();
+    const earliest = db.prepare(`SELECT MIN(at) AS earliest FROM (
+      SELECT MIN(started_at) AS at FROM sessions UNION ALL SELECT MIN(started_at) AS at FROM turns
+    )`).get() as { earliest: number | null };
+    const from = rangeStart(range, to, earliest.earliest ?? undefined);
+    const sessions = db.prepare(`SELECT s.id, s.project_name, s.machine_name, s.started_at,
+      COALESCE(s.ended_at, ?) AS ended_at,
+      COALESCE(sm.closure_reason, CASE WHEN s.ended_at IS NULL THEN 'open' ELSE 'legacy-unknown' END) AS closure_reason
+      FROM sessions s LEFT JOIN session_metadata sm ON sm.session_id = s.id
+      WHERE s.started_at < ? AND COALESCE(s.ended_at, ?) > ?`
+    ).all(to, to, to, from) as {
+      id: number; project_name: string | null; machine_name: string | null;
+      started_at: number; ended_at: number; closure_reason: string;
+    }[];
+    const turns = db.prepare(`SELECT t.provider_id, t.model, t.started_at,
+      COALESCE(t.ended_at, ?) AS ended_at, s.project_name,
+      COALESCE(tm.attribution_quality, 'legacy-unknown') AS attribution_quality,
+      COALESCE(tm.closure_reason, CASE WHEN t.ended_at IS NULL THEN 'open' ELSE 'legacy-unknown' END) AS closure_reason
+      FROM turns t LEFT JOIN sessions s ON s.id = t.session_id
+      LEFT JOIN turn_metadata tm ON tm.turn_row_id = t.id
+      WHERE t.started_at < ? AND COALESCE(t.ended_at, ?) > ?`
+    ).all(to, to, to, from) as {
+      provider_id: string; model: string; started_at: number; ended_at: number;
+      project_name: string | null; attribution_quality: string; closure_reason: string;
+    }[];
+    const analytics = aggregateAnalytics(
+      sessions.map((session): SessionInterval => ({
+        id: session.id, projectName: session.project_name, machineName: session.machine_name,
+        start: session.started_at, end: session.ended_at, closureReason: session.closure_reason,
+      })),
+      turns.map((turn): TurnInterval => ({
+        providerId: turn.provider_id, model: turn.model, projectName: turn.project_name,
+        start: turn.started_at, end: turn.ended_at,
+        attributionQuality: turn.attribution_quality, closureReason: turn.closure_reason,
+      })), from, to,
+    );
     return {
-      totalActiveMs: cap(totalActiveMs),
-      totalComputeMs,
-      turnCount: turns.length,
-      days,
-      projects: dimUnion((s) => s.project_name),
-      machines: dimUnion((s) => s.machine_name),
-      models: [...modelMap.values()].sort((a, b) => b.computeMs - a.computeMs),
+      range: { key: range, from, to, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "server local time" },
+      generatedAt: to,
+      workingMs: analytics.workingMs, agentRuntimeMs: analytics.agentRuntimeMs,
+      agentCoverageMs: analytics.agentCoverageMs, totalActiveMs: analytics.workingMs,
+      totalComputeMs: analytics.agentRuntimeMs, turnCount: analytics.turnCount,
+      days: analytics.days.map((day) => ({
+        ...day, activeMs: day.workingMs, computeMs: day.agentRuntimeMs, coverageMs: day.agentCoverageMs,
+      })),
+      projects: analytics.projects.map((row) => ({ ...row, activeMs: row.workingMs })),
+      machines: analytics.machines.map((row) => ({ ...row, activeMs: row.workingMs })),
+      models: analytics.models.map((row) => ({
+        ...row, computeMs: row.agentRuntimeMs, sampledTurnCount: row.observedTurnCount,
+      })),
+      projectModels: analytics.projectModels,
+      concurrency: {
+        averageConcurrentTurns: analytics.averageConcurrentTurns,
+        peakConcurrentTurns: analytics.peakConcurrentTurns,
+        swarmTimeMs: analytics.swarmTimeMs, distribution: analytics.distribution,
+      },
+      pace: {
+        coveredWorkingMs: analytics.coveredWorkingMs, coveragePercent: analytics.coveragePercent,
+        idleRunwayMs: analytics.idleRunwayMs, longestIdleRunwayMs: analytics.longestIdleRunwayMs,
+        medianTurnMs: analytics.medianTurnMs, p90TurnMs: analytics.p90TurnMs,
+        turnsPerActiveHour: analytics.turnsPerActiveHour,
+      },
+      streak: {
+        currentDays: analytics.currentStreakDays, longestDays: analytics.longestStreakDays,
+        busiestDay: analytics.busiestDay,
+      },
+      quality: {
+        sessionCount: analytics.quality.sessionCount, openSessionCount: analytics.quality.openSessionCount,
+        recoveredSessionCount: analytics.quality.recoveredSessionCount,
+        sampledTurnCount: analytics.quality.observedTurnCount,
+        recoveredTurnCount: analytics.quality.recoveredTurnCount,
+        unknownModelTurnCount: analytics.quality.unknownModelTurnCount,
+        linkedProjectModelTurnCount: analytics.quality.reliableProjectModelTurnCount,
+      },
     };
   }
 
-  bb.rpc.register(rpcContract, {
-    getSummary({ range }) {
-      return computeSummary(range);
-    },
-  });
-
-  // ---- CLI ----------------------------------------------------------------
+  bb.rpc.register(rpcContract, { getSummary({ range }) { return computeSummary(range) } });
   bb.cli.register({
-    name: "wakatime",
-    summary: "Show bb working-time stats",
+    name: "wakatime", summary: "Show honest interval-derived bb agent activity",
     commands: [
-      {
-        name: "today",
-        summary: "Today's working time and top breakdowns",
-        usage: "bb wakatime today",
-      },
-      {
-        name: "week",
-        summary: "Last 7 days working time and top breakdowns",
-        usage: "bb wakatime week",
-      },
+      { name: "today", summary: "Today's agent activity", usage: "bb wakatime today" },
+      { name: "week", summary: "The last 7 calendar days", usage: "bb wakatime week" },
     ],
     async run(argv) {
-      const range = argv[0] === "week" ? "7d" : "today";
-      const s = computeSummary(range);
-      const fmt = (ms: number) => {
-        const mins = Math.round(ms / 60_000);
-        const h = Math.floor(mins / 60);
-        return h > 0 ? `${h}h ${mins % 60}m` : `${mins}m`;
+      const summary = computeSummary(argv[0] === "week" ? "7d" : "today");
+      const format = (ms: number) => {
+        const minutes = Math.round(ms / 60_000);
+        return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
       };
-      const lines = [
-        `bb working time (${range}): ${fmt(s.totalActiveMs)} active`,
-        `agent compute: ${fmt(s.totalComputeMs)} across ${s.turnCount} turns`,
-        "",
-        "Top projects:",
-        ...s.projects.slice(0, 5).map((p) => `  ${p.name}: ${fmt(p.activeMs)}`),
-        "Top machines:",
-        ...s.machines.slice(0, 5).map((m) => `  ${m.name}: ${fmt(m.activeMs)}`),
-        "Models:",
-        ...s.models
-          .slice(0, 5)
-          .map((m) => `  ${m.providerId}/${m.model}: ${fmt(m.computeMs)} (${m.turnCount} turns)`),
-      ];
-      return { exitCode: 0, stdout: lines.join("\n") + "\n" };
+      return { exitCode: 0, stdout: [
+        `bb agent activity (${summary.range.key})`,
+        `working time (union): ${format(summary.workingMs)}`,
+        `agent runtime (sum): ${format(summary.agentRuntimeMs)}`,
+        `agent coverage (union): ${format(summary.agentCoverageMs)}`,
+        `turns: ${summary.turnCount}`,
+        `concurrency: ${summary.concurrency.averageConcurrentTurns.toFixed(2)} avg, ${summary.concurrency.peakConcurrentTurns} peak`,
+        `swarm time (2+ turns): ${format(summary.concurrency.swarmTimeMs)}`,
+      ].join("\n") + "\n" };
     },
   });
 
-  // ---- startup / shutdown -------------------------------------------------
-  await reconcile();
-
+  try { await reconcile() }
+  catch (error) { bb.log.warn(`startup reconciliation failed: ${String(error)}`) }
   bb.background.service("reconciler", {
     async start(signal) {
-      setHeartbeat.run(String(Date.now()));
+      statements.setHeartbeat.run(String(Date.now()));
       while (!signal.aborted) {
-        await sleep(30_000, signal);
+        await sleep(HEARTBEAT_MS, signal);
         if (signal.aborted) break;
-        setHeartbeat.run(String(Date.now()));
-        try {
-          await reconcile();
-        } catch (err) {
-          bb.log.warn(`periodic reconcile failed: ${String(err)}`);
-        }
+        statements.setHeartbeat.run(String(Date.now()));
+        try { await reconcile() }
+        catch (error) { bb.log.warn(`periodic reconciliation failed: ${String(error)}`) }
       }
     },
   });
-
   bb.onDispose(() => {
     const now = Date.now();
-    for (const t of pollers.values()) clearInterval(t);
+    for (const poller of pollers.values()) clearInterval(poller);
     pollers.clear();
-    // Close everything at dispose time; reconciliation re-adopts on load.
-    stmts.forceCloseAllOpenTurns.run(now);
-    stmts.closeAllOpenSessions.run(now);
-    setHeartbeat.run(String(now));
+    for (const threadId of openSessions.keys()) closeThreadIntervals(threadId, now, "plugin-dispose");
+    openSessions.clear();
+    statements.setHeartbeat.run(String(now));
   });
-
-  bb.log.info("wakatime plugin loaded");
+  bb.log.info("wakatime analytics v2 loaded");
 }

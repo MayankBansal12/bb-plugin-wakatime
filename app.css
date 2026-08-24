@@ -1,0 +1,146 @@
+.waka-shell {
+  container-type: inline-size;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  overflow: auto;
+  overflow-x: clip;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.waka-page {
+  width: 100%;
+  max-width: 80rem;
+  min-width: 0;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.waka-page *, .waka-page *::before, .waka-page *::after { box-sizing: border-box; }
+.waka-min-zero { min-width: 0; }
+.waka-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; min-width: 0; margin-bottom: .9rem; }
+.waka-kicker, .waka-eyebrow { margin: 0; color: var(--muted-foreground); font-size: .68rem; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; }
+.waka-page-header h1 { margin: .15rem 0 .22rem; font-size: clamp(1.35rem, 4cqi, 1.8rem); line-height: 1.15; letter-spacing: -.025em; }
+.waka-page-header p:not(.waka-kicker) { max-width: 44rem; margin: 0; color: var(--muted-foreground); font-size: .8rem; line-height: 1.45; }
+.waka-status { flex: none; min-height: 1.25rem; padding-top: .25rem; color: var(--muted-foreground); font-size: .72rem; font-variant-numeric: tabular-nums; }
+
+.waka-range { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); width: min(100%, 23rem); margin-bottom: 1rem; padding: .2rem; border: 1px solid var(--border); border-radius: .65rem; background: var(--muted); }
+.waka-range button, .waka-error button, .waka-refresh-error button { appearance: none; border: 0; font: inherit; cursor: pointer; }
+.waka-range button { min-width: 0; padding: .42rem .5rem; border-radius: .48rem; background: transparent; color: var(--muted-foreground); font-size: .75rem; font-weight: 550; white-space: nowrap; transition: transform 140ms cubic-bezier(.23,1,.32,1), background-color 140ms ease, color 140ms ease; }
+.waka-range button[aria-checked="true"] { background: var(--background); color: var(--foreground); box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 12%, transparent); }
+.waka-range button:focus-visible, .waka-error button:focus-visible, .waka-refresh-error button:focus-visible, .waka-chart-day:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.waka-range button:active, .waka-error button:active, .waka-refresh-error button:active { transform: scale(.97); }
+
+.waka-dashboard, .waka-loading { display: grid; min-width: 0; gap: .85rem; }
+.waka-definition-strip { display: flex; flex-wrap: wrap; gap: .5rem 1rem; min-width: 0; padding: .7rem .85rem; border: 1px solid var(--border); border-radius: .75rem; background: color-mix(in srgb, var(--muted) 55%, transparent); }
+.waka-definition-strip span, .waka-chart-legend span { display: inline-flex; align-items: center; min-width: 0; gap: .38rem; font-size: .72rem; font-weight: 600; }
+.waka-definition-strip small { color: var(--muted-foreground); font-size: .68rem; font-weight: 400; }
+.waka-definition-strip i, .waka-chart-legend i { width: .5rem; height: .5rem; flex: none; border-radius: 999px; }
+.waka-key-working { background: var(--primary); }
+.waka-key-coverage { background: color-mix(in srgb, var(--primary) 45%, var(--background)); border: 1px solid var(--primary); }
+.waka-key-runtime { background: var(--foreground); }
+
+.waka-metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.25rem), 1fr)); min-width: 0; gap: .65rem; }
+.waka-metric, .waka-card { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: .85rem; background: var(--card); color: var(--card-foreground); }
+.waka-metric { padding: .85rem; }
+.waka-metric-value { overflow: hidden; margin: .28rem 0 .12rem; font-size: 1.42rem; font-weight: 680; line-height: 1.15; letter-spacing: -.03em; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.waka-metric-detail { margin: 0; color: var(--muted-foreground); font-size: .7rem; line-height: 1.35; }
+.waka-card { padding: .95rem; }
+.waka-card-heading { display: flex; min-width: 0; justify-content: space-between; gap: .75rem; margin-bottom: .75rem; }
+.waka-card-heading h2 { margin: 0; font-size: .84rem; font-weight: 660; letter-spacing: -.01em; }
+.waka-card-heading p { margin: .14rem 0 0; color: var(--muted-foreground); font-size: .68rem; line-height: 1.35; }
+
+.waka-activity-card { grid-column: 1 / -1; }
+.waka-chart-wrap { width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; }
+.waka-activity-chart { display: block; width: 100%; height: auto; min-height: 10rem; max-height: 18rem; overflow: visible; }
+.waka-grid-line { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.waka-working-bar { fill: color-mix(in srgb, var(--primary) 78%, transparent); }
+.waka-coverage-bar { fill: color-mix(in srgb, var(--primary) 28%, var(--background)); stroke: var(--primary); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.waka-runtime-line { fill: none; stroke: var(--foreground); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.waka-runtime-dot { fill: var(--foreground); stroke: var(--card); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.waka-axis-label { fill: var(--muted-foreground); font-size: 10px; }
+.waka-chart-day { outline: none; }
+.waka-chart-day:focus .waka-working-bar { stroke: var(--ring); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.waka-chart-legend { display: flex; flex-wrap: wrap; justify-content: center; gap: .5rem 1rem; margin-top: .3rem; color: var(--muted-foreground); }
+.waka-empty-chart, .waka-empty-small { display: grid; place-items: center; color: var(--muted-foreground); text-align: center; }
+.waka-empty-chart { min-height: 11rem; font-size: .8rem; }
+.waka-empty-small { min-height: 7rem; font-size: .75rem; }
+
+.waka-analysis-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); min-width: 0; gap: .85rem; }
+.waka-breakdown-list { display: grid; gap: .7rem; min-width: 0; }
+.waka-breakdown-row { min-width: 0; }
+.waka-breakdown-label { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: .7rem; margin-bottom: .3rem; font-size: .73rem; }
+.waka-breakdown-label span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 560; }
+.waka-breakdown-label span:last-child { color: var(--muted-foreground); font-size: .68rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.waka-track { height: .34rem; overflow: hidden; border-radius: 999px; background: var(--muted); }
+.waka-track span { display: block; height: 100%; min-width: 2px; border-radius: inherit; background: var(--primary); }
+.waka-concurrency-headlines { display: grid; grid-template-columns: repeat(3, 1fr); gap: .5rem; margin-bottom: .9rem; }
+.waka-concurrency-headlines div, .waka-fun-grid div { min-width: 0; padding: .58rem; border-radius: .6rem; background: var(--muted); }
+.waka-concurrency-headlines span, .waka-fun-grid span { display: block; overflow: hidden; color: var(--muted-foreground); font-size: .64rem; text-overflow: ellipsis; white-space: nowrap; }
+.waka-concurrency-headlines strong, .waka-fun-grid strong { display: block; margin-top: .18rem; overflow: hidden; font-size: .92rem; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.waka-concurrency-stack { display: flex; height: .7rem; overflow: hidden; border-radius: 999px; background: var(--muted); }
+.waka-concurrency-stack span { min-width: 2px; background: var(--primary); border-right: 1px solid var(--card); }
+.waka-concurrency-stack span:nth-child(2n) { opacity: .68; }
+.waka-concurrency-stack span:nth-child(3n) { background: var(--foreground); }
+.waka-concurrency-legend { display: flex; flex-wrap: wrap; gap: .42rem .75rem; margin-top: .6rem; color: var(--muted-foreground); font-size: .66rem; }
+.waka-concurrency-legend span { display: inline-flex; align-items: center; gap: .3rem; }
+.waka-concurrency-legend i { width: .42rem; height: .42rem; border-radius: 2px; background: var(--primary); }
+.waka-project-models { display: grid; min-width: 0; gap: .15rem; }
+.waka-project-models > div { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .85fr) auto; min-width: 0; gap: .55rem; padding: .48rem .2rem; border-bottom: 1px solid var(--border); font-size: .7rem; }
+.waka-project-models > div:last-child { border-bottom: 0; }
+.waka-project-models span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.waka-project-models span:nth-child(2) { color: var(--muted-foreground); }
+.waka-project-models strong { font-variant-numeric: tabular-nums; }
+.waka-fun-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; }
+
+.waka-quality { display: flex; flex-wrap: wrap; gap: .3rem .8rem; min-width: 0; padding: .4rem .15rem .9rem; color: var(--muted-foreground); font-size: .65rem; line-height: 1.4; }
+.waka-quality strong { color: var(--foreground); }
+.waka-refresh-error, .waka-error { display: flex; align-items: center; justify-content: space-between; min-width: 0; gap: .8rem; border: 1px solid var(--destructive); border-radius: .75rem; color: var(--destructive); }
+.waka-refresh-error { padding: .6rem .75rem; font-size: .72rem; }
+.waka-error { padding: 1rem; }
+.waka-error strong { color: var(--foreground); }
+.waka-error p { margin: .2rem 0 0; overflow-wrap: anywhere; color: var(--muted-foreground); font-size: .75rem; }
+.waka-error button, .waka-refresh-error button { flex: none; padding: .4rem .7rem; border-radius: .45rem; background: var(--destructive); color: var(--destructive-foreground); transition: transform 140ms cubic-bezier(.23,1,.32,1); }
+.waka-refresh-error button { padding: .28rem .55rem; font-size: .68rem; }
+
+.waka-skeleton { border-radius: .75rem; background: linear-gradient(100deg, var(--muted) 35%, color-mix(in srgb, var(--muted) 65%, var(--foreground)) 50%, var(--muted) 65%); background-size: 220% 100%; animation: waka-skeleton 1.4s linear infinite; }
+.waka-skeleton-tabs { width: min(100%, 23rem); height: 2.25rem; }
+.waka-skeleton-metric { height: 6rem; }
+.waka-skeleton-chart { height: 17rem; }
+.waka-visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+@keyframes waka-skeleton { to { background-position-x: -220%; } }
+
+@container (max-width: 520px) {
+  .waka-page { padding: .75rem; }
+  .waka-page-header { flex-direction: column; gap: .2rem; }
+  .waka-status { padding-top: 0; }
+  .waka-definition-strip { display: grid; gap: .42rem; }
+  .waka-definition-strip span { flex-wrap: wrap; }
+  .waka-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .waka-analysis-grid { grid-template-columns: minmax(0, 1fr); }
+  .waka-fun-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .waka-card, .waka-metric { padding: .75rem; }
+  .waka-breakdown-label { grid-template-columns: minmax(0, 1fr); gap: .12rem; }
+  .waka-breakdown-label span:last-child { white-space: normal; }
+}
+
+@container (max-width: 310px) {
+  .waka-page { padding: .55rem; }
+  .waka-range { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .waka-metric-grid, .waka-fun-grid { grid-template-columns: minmax(0, 1fr); }
+  .waka-concurrency-headlines { grid-template-columns: minmax(0, 1fr); }
+  .waka-project-models > div { grid-template-columns: minmax(0, 1fr) auto; }
+  .waka-project-models > div span:nth-child(2) { grid-column: 1 / -1; grid-row: 2; }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .waka-range button:not([aria-checked="true"]):hover { background: color-mix(in srgb, var(--foreground) 7%, transparent); color: var(--foreground); }
+  .waka-track span { transition: opacity 140ms ease; }
+  .waka-breakdown-row:hover .waka-track span { opacity: .78; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waka-range button, .waka-error button, .waka-refresh-error button, .waka-track span { transition: none; }
+  .waka-skeleton { animation: none; background: var(--muted); }
+}

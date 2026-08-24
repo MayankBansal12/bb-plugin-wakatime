@@ -1,7 +1,12 @@
 {
   "name": "bb-plugin-wakatime",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "build": "bb plugin build"
+  },
   "engines": {
     "bb": ">=0.39",
     "bbPluginSdk": ">=0.4.8"
@@ -24,7 +29,9 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "better-sqlite3": "^12.0.0",
+    "cron-parser": "^5.5.0",
     "hono": "^4.11.9",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.4"
   }
 }

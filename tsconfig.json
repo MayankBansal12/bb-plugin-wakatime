@@ -10,12 +10,17 @@
       "DOM"
     ],
     "types": [
-      "node"
+      "node",
+      "vitest/globals"
     ],
     "noEmit": true,
     "skipLibCheck": false
   },
   "include": [
-    "server.ts"
+    "server.ts",
+    "analytics.ts",
+    "collector.ts",
+    "app.tsx",
+    "*.test.ts"
   ]
 }
