@@ -6,7 +6,7 @@ cd /home/echio-staging/code-projects/bb-plugin-wakatime
 cp /home/echio-staging/.bb-machines/mayank.getbb.app/npm/lib/node_modules/bb-app/app/dist/assets/index-CXWZ8ak3.css preview/bb-theme.css
 
 # the plugin's own Tailwind pass output
-bb plugin build >/dev/null
+npm run build >/dev/null
 cp dist/app.css preview/app.css
 
 npx esbuild preview/entry.tsx \

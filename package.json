@@ -5,7 +5,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "build": "bb plugin build"
+    "build": "bb plugin build && node scripts/add-legacy-css-fallback.mjs"
   },
   "engines": {
     "bb": ">=0.39",
@@ -35,6 +35,7 @@
     "better-sqlite3": "^12.0.0",
     "cron-parser": "^5.5.0",
     "hono": "^4.11.9",
+    "postcss": "^8.5.26",
     "typescript": "^5.7.0",
     "vitest": "^3.2.4"
   }

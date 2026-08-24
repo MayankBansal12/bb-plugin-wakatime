@@ -1,0 +1,21 @@
+/*
+ * Plugin-owned styles use conventional attribute selectors instead of @scope.
+ * Static sRGB colors avoid color-mix/OKLCH parsing failures in older webviews.
+ */
+[data-wk-root] {
+  --wk-machine-dot: #2f9e6a;
+  --wk-l0: #eceeed;
+  --wk-l1: #72c59a;
+  --wk-l2: #48ab7e;
+  --wk-l3: #2b8c62;
+  --wk-l4: #1a6b49;
+}
+
+.dark [data-wk-root] {
+  --wk-machine-dot: #2eae74;
+  --wk-l0: #2b2d2c;
+  --wk-l1: #22593c;
+  --wk-l2: #2b7d55;
+  --wk-l3: #359f6d;
+  --wk-l4: #45c98b;
+}

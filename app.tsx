@@ -1,11 +1,12 @@
 import { definePluginApp, useRpc } from "@get-bb/plugin-sdk/app";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { LabelList } from "recharts";
 import type { rpcContract } from "./server";
 import { EvilBarChart } from "@/components/evilcharts/charts/recharts-bar-chart";
 import type { ChartConfig } from "@/components/evilcharts/ui/recharts-chart";
 import { cn } from "@/lib/utils";
+import "./styles.css";
 
 type RangeKey = "today" | "7d" | "30d" | "all";
 
@@ -116,7 +117,7 @@ const TICK_STEPS = [
 /** Round axis ticks so they read "2h", not "1h 57m". */
 function hourTicks(maxMs: number): { ticks: number[]; max: number } {
   if (maxMs <= 0) return { ticks: [0], max: 1 };
-  const step = TICK_STEPS.find((candidate) => maxMs / candidate <= 3) ?? TICK_STEPS.at(-1)!;
+  const step = TICK_STEPS.find((candidate) => maxMs / candidate <= 3) ?? TICK_STEPS[TICK_STEPS.length - 1]!;
   const max = Math.ceil(maxMs / step) * step;
   const ticks: number[] = [];
   for (let value = 0; value <= max; value += step) ticks.push(value);
@@ -142,16 +143,38 @@ function localDayKey(timestamp: number): string {
 }
 
 function shortModel(model: string): string {
-  return model.split("/").at(-1) ?? model;
+  if (isUnknown(model)) return "Model not recorded";
+  const parts = model.split("/");
+  return parts[parts.length - 1] || model;
 }
 
 function providerLabel(providerId: string): string {
   const known: Record<string, string> = {
+    "acp-claude-code": "Claude Code",
+    "acp-opencode": "OpenCode",
     "claude-code": "Claude Code",
     codex: "Codex",
+    opencode: "OpenCode",
     pi: "Pi",
   };
-  return known[providerId] ?? providerId;
+  if (isUnknown(providerId)) return "Unattributed agent";
+  const normalized = providerId.trim().toLowerCase();
+  return known[normalized] ?? normalized
+    .replace(/^acp-/, "")
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function isUnknown(value: string | null | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  return !normalized || normalized === "unknown" || normalized === "unset" || normalized === "n/a";
+}
+
+function dimensionLabel(value: string, kind: "project" | "machine"): string {
+  if (!isUnknown(value)) return value;
+  return kind === "machine" ? "Unidentified machine" : "Unassigned project";
 }
 
 function truncate(value: string, max: number): string {
@@ -179,12 +202,12 @@ function Metric({ label, value, unit, detail }: {
 }) {
   return (
     <div className="bg-card border-border min-w-0 rounded-xl border p-4">
-      <p className="text-muted-foreground/80 truncate text-[11px] leading-none">{label}</p>
+      <p className="text-muted-foreground truncate text-[11px] leading-none opacity-80">{label}</p>
       <p className="text-foreground mt-2.5 truncate text-[22px] leading-none font-semibold tracking-tight tabular-nums">
         {value}
         {unit ? <span className="text-muted-foreground ml-1 text-sm font-normal">{unit}</span> : null}
       </p>
-      {detail ? <p className="text-muted-foreground/70 mt-2 truncate text-[11px] leading-none">{detail}</p> : null}
+      {detail ? <p className="text-muted-foreground mt-2 truncate text-[11px] leading-none opacity-70">{detail}</p> : null}
     </div>
   );
 }
@@ -201,11 +224,10 @@ function Empty({ children, className }: { children: ReactNode; className?: strin
 const CELL = 10;
 const CELL_GAP = 3;
 const PITCH = CELL + CELL_GAP;
-const WEEKDAY_COL = 26;
+const WEEKDAY_COL = 30;
+const LABEL_GAP = 6;
 
 function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }) {
-  const scopeId = useId().replace(/:/g, "");
-
   const { weeks, months, thresholds } = useMemo(() => {
     const byDate = new Map(days.map((day) => [day.date, day]));
 
@@ -235,7 +257,7 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
       const monthOfColumn = new Date(start + week * 7 * DAY_MS).getMonth();
       // Label a month on the first column that belongs to it, but only when the
       // previous label is far enough back that the two cannot collide.
-      const previous = monthLabels.at(-1);
+      const previous = monthLabels[monthLabels.length - 1];
       if (monthOfColumn !== lastMonth && (!previous || week - previous.index >= 3) && week <= HEATMAP_WEEKS - 3) {
         monthLabels.push({
           index: week,
@@ -260,28 +282,15 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
     return 4;
   };
 
-  const css = `
-[data-wk-heat="${scopeId}"] {
-  --wk-l0: color-mix(in oklch, var(--ink) 9%, var(--canvas));
-  --wk-l1: ${PALETTE.ramp.light[0]}; --wk-l2: ${PALETTE.ramp.light[1]};
-  --wk-l3: ${PALETTE.ramp.light[2]}; --wk-l4: ${PALETTE.ramp.light[3]};
-}
-.dark [data-wk-heat="${scopeId}"] {
-  --wk-l0: color-mix(in oklch, var(--ink) 13%, var(--canvas));
-  --wk-l1: ${PALETTE.ramp.dark[0]}; --wk-l2: ${PALETTE.ramp.dark[1]};
-  --wk-l3: ${PALETTE.ramp.dark[2]}; --wk-l4: ${PALETTE.ramp.dark[3]};
-}`;
-
   const gridWidth = WEEKDAY_COL + HEATMAP_WEEKS * PITCH - CELL_GAP;
 
   return (
-    <div data-wk-heat={scopeId}>
-      <style dangerouslySetInnerHTML={{ __html: css }} />
+    <div data-wk-heat>
       <div className="mb-3 flex items-center justify-between gap-3">
         <h2 className="text-foreground text-[13px] leading-none font-medium" title={`Daily working time · ${timezone}`}>
           Every day bb worked
         </h2>
-        <span className="text-muted-foreground/70 flex shrink-0 items-center gap-1 text-[11px] leading-none">
+        <span className="text-muted-foreground flex shrink-0 items-center gap-1 text-[11px] leading-none opacity-70">
           less
           {[0, 1, 2, 3, 4].map((level) => (
             <span
@@ -300,7 +309,7 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
             {months.map((month) => (
               <span
                 key={`${month.label}-${month.index}`}
-                className="text-muted-foreground/70 absolute top-0 text-[10px] leading-[14px]"
+                className="text-muted-foreground absolute top-0 text-[10px] leading-[14px] opacity-70"
                 style={{ left: WEEKDAY_COL + month.index * PITCH }}
               >
                 {month.label}
@@ -308,15 +317,20 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
             ))}
           </div>
 
-          <div className="flex" style={{ gap: CELL_GAP }}>
+          <div className="flex">
             <div
               className="grid shrink-0"
-              style={{ width: WEEKDAY_COL - CELL_GAP, gridTemplateRows: `repeat(7, ${CELL}px)`, rowGap: CELL_GAP }}
+              style={{
+                width: WEEKDAY_COL,
+                paddingRight: LABEL_GAP,
+                gridTemplateRows: `repeat(7, ${CELL}px)`,
+                rowGap: CELL_GAP,
+              }}
             >
               {["", "Mon", "", "Wed", "", "Fri", ""].map((label, index) => (
                 <span
                   key={index}
-                  className="text-muted-foreground/70 text-[10px]"
+                  className="text-muted-foreground text-right text-[10px] opacity-70"
                   style={{ lineHeight: `${CELL}px` }}
                 >
                   {label}
@@ -364,7 +378,7 @@ function DailyChart({ days }: { days: Day[] }) {
         const slice = days.slice(index * bucketSize, (index + 1) * bucketSize);
         return {
           from: slice[0]!.date,
-          to: slice.at(-1)!.date,
+          to: slice[slice.length - 1]!.date,
           day: {
             workingMs: slice.reduce((sum, entry) => sum + entry.workingMs, 0),
             turnCount: slice.reduce((sum, entry) => sum + entry.turnCount, 0),
@@ -481,10 +495,10 @@ function Rows({ items }: { items: Array<{ label: string; value: string; hint?: s
     <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
       {items.map((item) => (
         <div key={item.label} className="min-w-0">
-          <dt className="text-muted-foreground/70 truncate text-[11px] leading-none">{item.label}</dt>
+          <dt className="text-muted-foreground truncate text-[11px] leading-none opacity-70">{item.label}</dt>
           <dd className="text-foreground mt-2 truncate text-[13px] leading-none font-medium tabular-nums">
             {item.value}
-            {item.hint ? <span className="text-muted-foreground/70 ml-1 font-normal text-[11px]">{item.hint}</span> : null}
+            {item.hint ? <span className="text-muted-foreground ml-1 font-normal text-[11px] opacity-70">{item.hint}</span> : null}
           </dd>
         </div>
       ))}
@@ -560,35 +574,40 @@ function Dashboard() {
 
   const agents = useMemo(() => {
     if (!data) return [];
-    const byProvider = new Map<string, { runtimeMs: number; turns: number }>();
+    const byProvider = new Map<string, { runtimeMs: number; turns: number; unattributed: boolean }>();
     for (const row of data.models) {
-      const entry = byProvider.get(row.providerId) ?? { runtimeMs: 0, turns: 0 };
+      const name = providerLabel(row.providerId);
+      const entry = byProvider.get(name) ?? {
+        runtimeMs: 0,
+        turns: 0,
+        unattributed: isUnknown(row.providerId),
+      };
       entry.runtimeMs += row.agentRuntimeMs;
       entry.turns += row.turnCount;
-      byProvider.set(row.providerId, entry);
+      byProvider.set(name, entry);
     }
     return [...byProvider.entries()]
-      .map(([providerId, entry]) => ({
-        name: providerLabel(providerId),
+      .map(([name, entry]) => ({
+        name,
         value: entry.runtimeMs,
-        detail: `${entry.turns} turns`,
+        detail: entry.unattributed ? `${entry.turns} older turns` : `${entry.turns} turns`,
+        unattributed: entry.unattributed,
       }))
-      .sort((a, b) => b.value - a.value);
+      .sort((a, b) => Number(a.unattributed) - Number(b.unattributed) || b.value - a.value);
   }, [data]);
 
-  const topAgent = agents[0];
+  const topAgent = agents.find((agent) => !agent.unattributed) ?? agents[0];
   const topModel = useMemo(() => {
     if (!data || data.models.length === 0) return null;
-    return [...data.models].sort((a, b) => b.agentRuntimeMs - a.agentRuntimeMs)[0]!;
+    return [...data.models]
+      .filter((row) => !isUnknown(row.model))
+      .sort((a, b) => b.agentRuntimeMs - a.agentRuntimeMs)[0] ?? null;
   }, [data]);
   const rangeBlurb = RANGES.find((option) => option.key === range)?.blurb ?? "";
   const heroParts = data ? splitDuration(data.workingMs) : [];
 
   return (
     <main className="h-full overflow-y-auto" data-wk-root>
-      <style dangerouslySetInnerHTML={{ __html: `
-[data-wk-root] { --wk-machine-dot: ${PALETTE.series.light}; }
-.dark [data-wk-root] { --wk-machine-dot: ${PALETTE.series.dark}; }` }} />
       <div className="mx-auto w-full max-w-4xl space-y-3 p-4 md:p-5">
         <header className="flex justify-end">
           <div
@@ -604,7 +623,7 @@ function Dashboard() {
                 key={option.key}
                 onClick={() => changeRange(option.key)}
                 className={cn(
-                  "rounded-md px-2.5 py-1.5 text-xs leading-none transition-colors duration-150 ease-out active:scale-[0.97]",
+                  "rounded-md px-2.5 py-1.5 text-xs leading-none transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-out active:[transform:scale(.97)]",
                   range === option.key
                     ? "bg-background text-foreground border-border border shadow-sm"
                     : "text-muted-foreground hover:text-foreground border border-transparent",
@@ -627,7 +646,7 @@ function Dashboard() {
             <button
               type="button"
               onClick={() => void load(range, true)}
-              className="border-border hover:bg-muted shrink-0 rounded-lg border px-3 py-1.5 text-xs transition-colors duration-150 ease-out active:scale-[0.97]"
+              className="border-border hover:bg-muted shrink-0 rounded-lg border px-3 py-1.5 text-xs transition-[color,background-color,border-color,transform] duration-150 ease-out active:[transform:scale(.97)]"
             >
               Retry
             </button>
@@ -637,7 +656,7 @@ function Dashboard() {
         {data ? (
           <div className="space-y-3" aria-busy={refreshing}>
             {error ? (
-              <div className="border-border bg-muted/40 text-muted-foreground flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs" role="status">
+              <div className="border-border bg-muted text-muted-foreground flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs" role="status">
                 <span className="truncate">Showing the last good data — refresh failed.</span>
                 <button type="button" onClick={() => void load(range)} className="text-foreground shrink-0 underline underline-offset-2">
                   Retry
@@ -646,7 +665,7 @@ function Dashboard() {
             ) : null}
 
             <section className="bg-card border-border min-w-0 rounded-xl border p-4">
-              <p className="text-muted-foreground/80 text-[11px] leading-none">bb worked {rangeBlurb}</p>
+              <p className="text-muted-foreground text-[11px] leading-none opacity-80">bb worked {rangeBlurb}</p>
               <p className="text-foreground mt-2.5 flex items-baseline gap-1.5 text-[40px] leading-none font-semibold tracking-tight tabular-nums">
                 {heroParts.map((part) => (
                   <span key={part.unit}>
@@ -655,7 +674,7 @@ function Dashboard() {
                   </span>
                 ))}
               </p>
-              <p className="text-muted-foreground/70 mt-2.5 text-[11px] leading-none">
+              <p className="text-muted-foreground mt-2.5 text-[11px] leading-none">
                 <span className="text-foreground font-medium">{data.turnCount.toLocaleString()}</span> turns across{" "}
                 <span className="text-foreground font-medium">{data.projects.length}</span>{" "}
                 project{data.projects.length === 1 ? "" : "s"}
@@ -703,7 +722,10 @@ function Dashboard() {
               </Card>
               <Card title="Projects" note="Union of active thread time per project">
                 <Leaderboard
-                  rows={data.projects.slice(0, 5).map((row) => ({ name: row.name, value: row.workingMs }))}
+                  rows={data.projects.slice(0, 5).map((row) => ({
+                    name: dimensionLabel(row.name, "project"),
+                    value: row.workingMs,
+                  }))}
                   emptyLabel="No project activity yet."
                 />
               </Card>
@@ -716,13 +738,15 @@ function Dashboard() {
                 ) : (
                   <ul className="divide-border -my-1.5 divide-y">
                     {[...data.models]
-                      .sort((a, b) => b.agentRuntimeMs - a.agentRuntimeMs)
+                      .sort((a, b) =>
+                        Number(isUnknown(a.model)) - Number(isUnknown(b.model)) || b.agentRuntimeMs - a.agentRuntimeMs,
+                      )
                       .slice(0, 5)
                       .map((row) => (
                         <li key={`${row.providerId}-${row.model}`} className="flex items-center justify-between gap-3 py-2">
                           <div className="flex min-w-0 items-center gap-2">
                             <span className="text-foreground truncate text-[13px] font-medium">{shortModel(row.model)}</span>
-                            <span className="text-muted-foreground/70 shrink-0 text-[11px]">{providerLabel(row.providerId)}</span>
+                            <span className="text-muted-foreground shrink-0 text-[11px] opacity-70">{providerLabel(row.providerId)}</span>
                           </div>
                           <span className="text-foreground shrink-0 text-[13px] font-medium tabular-nums">{formatDuration(row.agentRuntimeMs)}</span>
                         </li>
@@ -752,15 +776,17 @@ function Dashboard() {
                   {data.machines.slice(0, 6).map((row) => (
                     <li
                       key={row.name}
-                      className="border-border bg-muted/40 flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5"
+                      className="border-border bg-muted flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5"
                     >
                       <span
                         aria-hidden="true"
                         className="size-1.5 shrink-0 rounded-full"
                         style={{ backgroundColor: "var(--wk-machine-dot)" }}
                       />
-                      <span className="text-foreground truncate text-[13px] font-medium">{row.name}</span>
-                      <span className="text-muted-foreground/70 shrink-0 text-[11px] tabular-nums">
+                      <span className="text-foreground truncate text-[13px] font-medium">
+                        {dimensionLabel(row.name, "machine")}
+                      </span>
+                      <span className="text-muted-foreground shrink-0 text-[11px] tabular-nums opacity-70">
                         {formatDuration(row.workingMs)}
                       </span>
                     </li>
@@ -769,7 +795,7 @@ function Dashboard() {
               </Card>
             ) : null}
 
-            <p className="text-muted-foreground/60 pb-1 text-center text-[11px]">
+            <p className="text-muted-foreground pb-1 text-center text-[11px] opacity-60">
               {data.quality.sampledTurnCount.toLocaleString()} of {data.turnCount.toLocaleString()} turns carry model attribution
               {topModel ? ` · most used ${shortModel(topModel.model)}` : ""}
             </p>
