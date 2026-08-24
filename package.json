@@ -1,7 +1,12 @@
 {
   "name": "bb-plugin-wakatime",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "build": "bb plugin build && node scripts/add-legacy-css-fallback.mjs"
+  },
   "engines": {
     "bb": ">=0.39",
     "bbPluginSdk": ">=0.4.8"
@@ -10,12 +15,16 @@
     "name": "WakaTime",
     "description": "Time tracking for bb \u2014 working time by project, machine, and model.",
     "branding": {
-      "icon": "Clock"
+      "icon": "./icons/wakatime.svg"
     },
     "server": "./server.ts",
     "app": "./app.tsx"
   },
   "dependencies": {
+    "clsx": "^2.1.1",
+    "motion": "^13.1.1",
+    "recharts": "^3.10.1",
+    "tailwind-merge": "^3.6.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -24,7 +33,10 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "better-sqlite3": "^12.0.0",
+    "cron-parser": "^5.5.0",
     "hono": "^4.11.9",
-    "typescript": "^5.7.0"
+    "postcss": "^8.5.26",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.4"
   }
 }

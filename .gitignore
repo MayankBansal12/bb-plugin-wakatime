@@ -1,2 +1,5 @@
 node_modules/
 dist/
+preview/bundle.js
+preview/*.css
+preview/*.png

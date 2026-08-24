@@ -1,0 +1,101 @@
+/*
+ * Plugin-owned styles use conventional attribute selectors instead of @scope.
+ * Static sRGB colors avoid color-mix/OKLCH parsing failures in older webviews.
+ */
+[data-wk-root] {
+  --wk-machine-dot: #2f9e6a;
+  --wk-tooltip-bg: #1f2221;
+  --wk-tooltip-fg: #f7f8f7;
+  --wk-l0: #eceeed;
+  --wk-l1: #72c59a;
+  --wk-l2: #48ab7e;
+  --wk-l3: #2b8c62;
+  --wk-l4: #1a6b49;
+}
+
+[data-wk-root],
+[data-wk-root] * {
+  box-sizing: border-box;
+}
+
+/* Cap the dashboard at a comfortable reading width and centre it. Charts
+ * measure fine inside this because each one owns a definite height. */
+[data-wk-root] .wk-dashboard-shell {
+  width: 100%;
+  max-width: 56rem;
+  margin-inline: auto;
+}
+
+/* HTML labels get a real, keyboard-accessible tooltip. This intentionally
+ * avoids popover/@starting-style so it also works in older Firefox webviews. */
+[data-wk-tooltip]:not([data-wk-tooltip=""]) {
+  position: relative;
+}
+
+[data-wk-tooltip]:not([data-wk-tooltip=""])::after {
+  position: absolute;
+  z-index: 50;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  max-width: min(280px, 80vw);
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--wk-tooltip-bg);
+  color: var(--wk-tooltip-fg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  content: attr(data-wk-tooltip);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.35;
+  text-align: left;
+  white-space: normal;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, 2px) scale(0.98);
+  transform-origin: 50% 100%;
+  transition: opacity 140ms cubic-bezier(0.23, 1, 0.32, 1), transform 140ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+[data-wk-tooltip]:not([data-wk-tooltip=""]):hover::after,
+[data-wk-tooltip]:not([data-wk-tooltip=""]):focus::after,
+[data-wk-tooltip]:not([data-wk-tooltip=""]):focus-visible::after {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+}
+
+.wk-graph-tooltip {
+  position: fixed;
+  z-index: 100;
+  max-width: min(300px, calc(100vw - 24px));
+  margin-top: -7px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--wk-tooltip-bg);
+  color: var(--wk-tooltip-fg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.wk-heat-cell {
+  cursor: default;
+}
+
+.dark [data-wk-root] {
+  --wk-machine-dot: #2eae74;
+  --wk-l0: #2b2d2c;
+  --wk-l1: #22593c;
+  --wk-l2: #2b7d55;
+  --wk-l3: #359f6d;
+  --wk-l4: #45c98b;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-wk-root] [data-wk-tooltip]::after {
+    transition-duration: 0ms;
+  }
+}
