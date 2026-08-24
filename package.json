@@ -13,7 +13,7 @@
   },
   "bb": {
     "name": "WakaTime",
-    "description": "Time tracking for bb \u2014 working time by project, machine, and model.",
+    "description": "Time tracking for bb — working time by project, machine, and model.",
     "branding": {
       "icon": "Clock"
     },
@@ -21,6 +21,10 @@
     "app": "./app.tsx"
   },
   "dependencies": {
+    "clsx": "^2.1.1",
+    "motion": "^13.1.1",
+    "recharts": "^3.10.1",
+    "tailwind-merge": "^3.6.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

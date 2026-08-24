@@ -14,13 +14,21 @@
       "vitest/globals"
     ],
     "noEmit": true,
-    "skipLibCheck": false
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    }
   },
   "include": [
     "server.ts",
     "analytics.ts",
     "collector.ts",
     "app.tsx",
+    "lib/**/*.ts",
+    "components/**/*.tsx",
     "*.test.ts"
   ]
 }
