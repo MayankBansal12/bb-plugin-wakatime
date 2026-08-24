@@ -235,7 +235,7 @@ function Card({ title, note, icon, action, children, className }: {
     <section className={cn("bg-card border-border flex min-w-0 flex-col rounded-xl border p-4", className)}>
       {title ? (
         <div className="mb-3 flex items-center justify-between gap-3">
-          <h2 className="text-foreground flex min-w-0 items-center gap-2 text-[13px] leading-none font-medium"
+          <h2 className="text-foreground flex min-w-0 items-center gap-2 text-[13px] leading-4 font-medium"
             data-wk-tooltip={note} tabIndex={note ? 0 : undefined}>
             {icon ? <Icon name={icon} className="text-muted-foreground" /> : null}
             <span className="truncate">{title}</span>
@@ -253,7 +253,7 @@ function Metric({ label, value, unit, detail, icon, logo }: {
 }) {
   return (
     <div className="bg-card border-border min-w-0 rounded-xl border p-4">
-      <p className="text-muted-foreground flex items-center gap-1.5 truncate text-[11px] leading-none opacity-80">
+      <p className="text-muted-foreground flex items-center gap-1.5 truncate text-[11px] leading-[14px] opacity-80">
         <Icon name={icon} className="size-3.5" /> {label}
       </p>
       <p className={cn(
@@ -342,12 +342,12 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
     return 4;
   };
 
-  const gridWidth = WEEKDAY_COL + HEATMAP_WEEKS * PITCH - CELL_GAP;
+  const cellsWidth = HEATMAP_WEEKS * PITCH - CELL_GAP;
 
   useEffect(() => {
     const scroller = scrollRef.current;
     if (scroller) scroller.scrollLeft = scroller.scrollWidth - scroller.clientWidth;
-  }, [gridWidth]);
+  }, [cellsWidth]);
 
   const showCellTooltip = (element: HTMLElement, text: string, x?: number, y?: number) => {
     const rect = element.getBoundingClientRect();
@@ -361,11 +361,11 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
   return (
     <div data-wk-heat>
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h2 className="text-foreground flex items-center gap-2 text-[13px] leading-none font-medium"
+        <h2 className="text-foreground flex items-center gap-2 text-[13px] leading-4 font-medium"
           data-wk-tooltip={`Daily working time · ${timezone}`} tabIndex={0}>
-          <Icon name="calendar" className="text-muted-foreground" /> Every day bb worked
+          <Icon name="calendar" className="text-muted-foreground" /> Activity graph
         </h2>
-        <span className="text-muted-foreground flex shrink-0 items-center gap-1 text-[11px] leading-none opacity-70">
+        <span className="text-muted-foreground flex shrink-0 items-center gap-1 text-[11px] leading-4 opacity-70">
           less
           {[0, 1, 2, 3, 4].map((level) => (
             <span
@@ -377,42 +377,43 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
         </span>
       </div>
 
-      <div ref={scrollRef} className="overflow-x-auto pb-0.5" aria-label="Daily working time for the trailing year">
-        <div style={{ width: gridWidth }}>
-          {/* month row: absolutely placed so each label sits over its own column */}
-          <div className="relative" style={{ height: 14, marginBottom: CELL_GAP, marginLeft: WEEKDAY_COL }}>
-            {months.map((month) => (
-              <span key={`${month.label}-${month.index}`}
-                className="text-muted-foreground absolute top-0 text-[10px] leading-[14px] opacity-70"
-                style={{ left: month.index * PITCH }}>
-                {month.label}
+      <div className="flex">
+        {/* Weekday gutter lives outside the scroller: inside it, scrolling to
+            the most recent week slid these labels out of view. */}
+        <div className="shrink-0" style={{ width: WEEKDAY_COL, paddingRight: LABEL_GAP }}>
+          <div style={{ height: 14, marginBottom: CELL_GAP }} aria-hidden="true" />
+          <div className="grid" style={{ gridTemplateRows: `repeat(7, ${CELL}px)`, rowGap: CELL_GAP }}>
+            {["", "Mon", "", "Wed", "", "Fri", ""].map((label, index) => (
+              <span
+                key={index}
+                className="text-muted-foreground text-right text-[10px] opacity-70"
+                style={{ lineHeight: `${CELL}px` }}
+              >
+                {label}
               </span>
             ))}
           </div>
+        </div>
 
-          <div className="flex">
-            <div
-              className="grid shrink-0"
-              style={{
-                width: WEEKDAY_COL,
-                paddingRight: LABEL_GAP,
-                gridTemplateRows: `repeat(7, ${CELL}px)`,
-                rowGap: CELL_GAP,
-              }}
-            >
-              {["", "Mon", "", "Wed", "", "Fri", ""].map((label, index) => (
-                <span
-                  key={index}
-                  className="text-muted-foreground text-right text-[10px] opacity-70"
-                  style={{ lineHeight: `${CELL}px` }}
-                >
-                  {label}
+        <div
+          ref={scrollRef}
+          className="min-w-0 flex-1 overflow-x-auto pb-0.5"
+          aria-label="Daily working time for the trailing year"
+        >
+          <div style={{ width: cellsWidth }}>
+            {/* month row: absolutely placed so each label sits over its own column */}
+            <div className="relative" style={{ height: 14, marginBottom: CELL_GAP }}>
+              {months.map((month) => (
+                <span key={`${month.label}-${month.index}`}
+                  className="text-muted-foreground absolute top-0 text-[10px] leading-[14px] opacity-70"
+                  style={{ left: month.index * PITCH }}>
+                  {month.label}
                 </span>
               ))}
             </div>
 
             <div
-              className="grid shrink-0"
+              className="grid"
               style={{
                 gridAutoFlow: "column",
                 gridTemplateRows: `repeat(7, ${CELL}px)`,
@@ -748,7 +749,7 @@ function Dashboard() {
             ) : null}
 
             <section className="bg-card border-border min-w-0 rounded-xl border p-4">
-              <p className="text-muted-foreground flex items-center gap-1.5 text-[11px] leading-none opacity-80">
+              <p className="text-muted-foreground flex items-center gap-1.5 text-[11px] leading-[14px] opacity-80">
                 <Icon name="stopwatch" className="size-3.5" /> bb worked {rangeBlurb}
               </p>
               <p className="text-foreground mt-2.5 flex items-baseline gap-1.5 text-[40px] leading-none font-semibold tracking-tight tabular-nums">
