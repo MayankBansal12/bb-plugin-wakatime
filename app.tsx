@@ -5,6 +5,8 @@ import { LabelList } from "recharts";
 import type { rpcContract } from "./server";
 import { EvilBarChart } from "@/components/evilcharts/charts/recharts-bar-chart";
 import type { ChartConfig } from "@/components/evilcharts/ui/recharts-chart";
+import { ProviderLogo, modelLogoId } from "@/components/provider-logo";
+import { SegmentedControl } from "@/components/ui/segmented-control";
 import { cn } from "@/lib/utils";
 import "./styles.css";
 
@@ -181,35 +183,49 @@ function truncate(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
-type IconName = "activity" | "agent" | "calendar" | "clock" | "flame" | "machine" | "model" | "project" | "sparkles";
+type IconName =
+  | "bot" | "calendar" | "chart" | "clock" | "cpu"
+  | "flame" | "folder" | "gauge" | "layers" | "monitor" | "stopwatch";
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
-  activity: <><path d="M3 12h3l2-6 4 12 2-6h7" /></>,
-  agent: <><rect x="4" y="5" width="16" height="14" rx="4" /><path d="M9 10h.01M15 10h.01M9 15h6M12 2v3" /></>,
+  bot: <><rect x="4" y="8" width="16" height="12" rx="3" /><path d="M12 4v4M9 13h.01M15 13h.01M10 17h4" /><path d="M2 13v2M22 13v2" /></>,
   calendar: <><rect x="3" y="5" width="18" height="16" rx="3" /><path d="M8 3v4M16 3v4M3 10h18" /></>,
-  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
-  flame: <><path d="M12 22c4 0 7-3 7-7 0-3-2-6-5-9 0 3-1 5-3 6 0-4-2-7-4-9 0 5-3 7-3 12 0 4 4 7 8 7Z" /></>,
-  machine: <><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4" /></>,
-  model: <><path d="m12 3 2.1 4.9L19 10l-4.9 2.1L12 17l-2.1-4.9L5 10l4.9-2.1L12 3Z" /><path d="m19 16 .8 1.8L22 19l-2.2 1.2L19 22l-.8-1.8L16 19l2.2-1.2L19 16Z" /></>,
-  project: <><path d="M3 7h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" /><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5" /></>,
-  sparkles: <><path d="m12 3 1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3Z" /><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z" /></>,
+  chart: <><path d="M3 21h18" /><rect x="5" y="11" width="3.5" height="7" rx="1" /><rect x="10.25" y="6" width="3.5" height="12" rx="1" /><rect x="15.5" y="14" width="3.5" height="4" rx="1" /></>,
+  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7.5V12l3 2" /></>,
+  cpu: <><rect x="7" y="7" width="10" height="10" rx="2.5" /><path d="M10 2v3M14 2v3M10 19v3M14 19v3M2 10h3M2 14h3M19 10h3M19 14h3" /></>,
+  flame: <><path d="M12 22c3.6 0 6.5-2.7 6.5-6.3 0-4.2-4-6.4-4.7-10.7-1.9 1.2-3 3-3 5.1-1.3-.6-2-1.9-2-3.4C6.6 8.4 5.5 11 5.5 13.9 5.5 18.5 8.4 22 12 22Z" /></>,
+  folder: <><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.2a2 2 0 0 1 1.5.7l1 1.1a2 2 0 0 0 1.5.7h5.8A2.5 2.5 0 0 1 21 10v6.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5Z" /></>,
+  gauge: <><path d="M4 18a9 9 0 1 1 16 0" /><path d="m12 14 4-4" /><circle cx="12" cy="14" r="1.6" /></>,
+  layers: <><path d="m12 3 8.5 4.5L12 12 3.5 7.5 12 3Z" /><path d="m4 12 8 4.3 8-4.3" /><path d="m4 16.5 8 4.3 8-4.3" /></>,
+  monitor: <><rect x="3" y="4" width="18" height="12" rx="2.5" /><path d="M9 20h6M12 16v4" /></>,
+  stopwatch: <><circle cx="12" cy="13.5" r="7.5" /><path d="M9.5 2h5M18.6 5.4 20 6.8M12 9.5v4l2.4 2.4" /></>,
 };
 
 function Icon({ name, className }: { name: IconName; className?: string }) {
   return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"
       strokeLinecap="round" strokeLinejoin="round" className={cn("size-4 shrink-0", className)}>
       {ICON_PATHS[name]}
     </svg>
   );
 }
 
-function ProviderLogo({ providerId, label }: { providerId: string; label?: string }) {
-  const normalized = providerId.trim().toLowerCase();
-  const name = label ?? providerLabel(providerId);
-  const mark = normalized.includes("claude") ? "A" : normalized.includes("open") ? "O" : normalized === "pi" ? "π" : normalized.includes("codex") ? "◈" : "?";
-  const tone = normalized.includes("claude") ? "claude" : normalized.includes("open") ? "opencode" : normalized === "pi" ? "pi" : normalized.includes("codex") ? "codex" : "unknown";
-  return <span className="wk-provider-logo" data-provider={tone} data-wk-tooltip={name} aria-label={name}>{mark}</span>;
+/** bb provider id -> brand mark id. Unknown providers render no mark at all. */
+function providerLogoId(providerId: string): string | null {
+  const key = providerId.trim().toLowerCase();
+  if (!key || isUnknown(key)) return null;
+  if (key.includes("claude")) return "claude";
+  if (key.includes("codex")) return "codex";
+  if (key.includes("opencode")) return "opencode";
+  if (key.includes("copilot")) return "copilot";
+  if (key.includes("cursor")) return "cursor";
+  if (key.includes("gemini") || key.includes("google")) return "google";
+  if (key === "pi") return "pi";
+  return modelLogoId(key);
+}
+
+function AgentMark({ providerId, size = "sm" }: { providerId: string; size?: "sm" | "md" }) {
+  return <ProviderLogo id={providerLogoId(providerId)} size={size} />;
 }
 
 function Card({ title, note, icon, action, children, className }: {
@@ -240,10 +256,14 @@ function Metric({ label, value, unit, detail, icon, logo }: {
       <p className="text-muted-foreground flex items-center gap-1.5 truncate text-[11px] leading-none opacity-80">
         <Icon name={icon} className="size-3.5" /> {label}
       </p>
-      <p className="text-foreground mt-2.5 flex min-w-0 items-center gap-2 text-[22px] leading-none font-semibold tracking-tight tabular-nums">
+      <p className={cn(
+        "text-foreground mt-2.5 flex min-w-0 items-center gap-2 leading-none font-semibold tracking-tight tabular-nums",
+        // names run long next to a brand mark; step the type down rather than clip
+        logo || value.length > 9 ? "text-[17px]" : "text-[22px]",
+      )}>
         {logo}
         <span className="truncate" data-wk-tooltip={value}>{value}</span>
-        {unit ? <span className="text-muted-foreground ml-1 text-sm font-normal">{unit}</span> : null}
+        {unit ? <span className="text-muted-foreground ml-0.5 text-sm font-normal">{unit}</span> : null}
       </p>
       {detail ? <p className="text-muted-foreground mt-2 truncate text-[11px] leading-none opacity-70">{detail}</p> : null}
     </div>
@@ -358,13 +378,13 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
       </div>
 
       <div ref={scrollRef} className="overflow-x-auto pb-0.5" aria-label="Daily working time for the trailing year">
-        <div style={{ width: "100%", minWidth: gridWidth }}>
+        <div style={{ width: gridWidth }}>
           {/* month row: absolutely placed so each label sits over its own column */}
           <div className="relative" style={{ height: 14, marginBottom: CELL_GAP, marginLeft: WEEKDAY_COL }}>
             {months.map((month) => (
               <span key={`${month.label}-${month.index}`}
                 className="text-muted-foreground absolute top-0 text-[10px] leading-[14px] opacity-70"
-                style={{ left: `${(month.index / (HEATMAP_WEEKS - 1)) * 100}%` }}>
+                style={{ left: month.index * PITCH }}>
                 {month.label}
               </span>
             ))}
@@ -392,13 +412,13 @@ function ContributionGraph({ days, timezone }: { days: Day[]; timezone: string }
             </div>
 
             <div
-              className="grid min-w-0 flex-1"
+              className="grid shrink-0"
               style={{
                 gridAutoFlow: "column",
                 gridTemplateRows: `repeat(7, ${CELL}px)`,
-                gridTemplateColumns: `repeat(${HEATMAP_WEEKS}, ${CELL}px)`,
+                gridAutoColumns: `${CELL}px`,
+                columnGap: CELL_GAP,
                 rowGap: CELL_GAP,
-                justifyContent: "space-between",
               }}
             >
               {weeks.flatMap((column) =>
@@ -599,7 +619,7 @@ function LoadingState() {
 }
 
 export default definePluginApp((app) => {
-  app.slots.navPanel({ id: "time", title: "Activity", icon: "Clock", path: "time", component: Dashboard });
+  app.slots.navPanel({ id: "time", title: "WakaTime", icon: "Clock", path: "time", component: Dashboard });
 });
 
 function Dashboard() {
@@ -690,29 +710,12 @@ function Dashboard() {
     <main className="h-full overflow-y-auto" data-wk-root>
       <div className="wk-dashboard-shell w-full space-y-3 p-4 md:p-5">
         <header className="flex justify-end">
-          <div
-            className="bg-muted flex shrink-0 items-center gap-0.5 rounded-lg p-0.5"
-            role="radiogroup"
-            aria-label="Date range"
-          >
-            {RANGES.map((option) => (
-              <button
-                type="button"
-                role="radio"
-                aria-checked={range === option.key}
-                key={option.key}
-                onClick={() => changeRange(option.key)}
-                className={cn(
-                  "rounded-md px-2.5 py-1.5 text-xs leading-none transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-out active:[transform:scale(.97)]",
-                  range === option.key
-                    ? "bg-background text-foreground border-border border shadow-sm"
-                    : "text-muted-foreground hover:text-foreground border border-transparent",
-                )}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
+          <SegmentedControl
+            label="Date range"
+            value={range}
+            onChange={changeRange}
+            options={RANGES.map((option) => ({ value: option.key, label: option.label }))}
+          />
         </header>
 
         {loading && !data ? <LoadingState /> : null}
@@ -746,7 +749,7 @@ function Dashboard() {
 
             <section className="bg-card border-border min-w-0 rounded-xl border p-4">
               <p className="text-muted-foreground flex items-center gap-1.5 text-[11px] leading-none opacity-80">
-                <Icon name="sparkles" className="size-3.5" /> bb worked {rangeBlurb}
+                <Icon name="stopwatch" className="size-3.5" /> bb worked {rangeBlurb}
               </p>
               <p className="text-foreground mt-2.5 flex items-baseline gap-1.5 text-[40px] leading-none font-semibold tracking-tight tabular-nums">
                 {heroParts.map((part) => (
@@ -772,14 +775,14 @@ function Dashboard() {
               />
               <Metric
                 label="Busiest agent"
-                icon="agent"
+                icon="bot"
                 value={topAgent ? topAgent.name : "—"}
-                logo={topAgent ? <ProviderLogo providerId={topAgent.providerId} label={topAgent.name} /> : undefined}
+                logo={topAgent ? <AgentMark providerId={topAgent.providerId} size="md" /> : undefined}
                 detail={topAgent ? formatDuration(topAgent.value) : "nothing attributed"}
               />
               <Metric
                 label="Peak swarm"
-                icon="activity"
+                icon="layers"
                 value={String(data.concurrency.peakConcurrentTurns)}
                 unit="×"
                 detail={`${data.concurrency.averageConcurrentTurns.toFixed(1)}× average`}
@@ -799,15 +802,15 @@ function Dashboard() {
               </Card>
             ) : null}
 
-            <Card title="Daily activity" note="Union of active thread time, per day" icon="activity">
+            <Card title="Daily activity" note="Union of active thread time, per day" icon="chart">
               <DailyChart days={data.days} />
             </Card>
 
             <div className="grid items-start gap-3 md:grid-cols-2">
-              <Card title="Busiest agents" note="Summed turn duration per provider" icon="agent">
+              <Card title="Busiest agents" note="Summed turn duration per provider" icon="bot">
                 <Leaderboard rows={agents.slice(0, 5)} emptyLabel="No agent turns attributed yet." />
               </Card>
-              <Card title="Projects" note="Union of active thread time per project" icon="project">
+              <Card title="Projects" note="Union of active thread time per project" icon="folder">
                 <Leaderboard
                   rows={data.projects.slice(0, 5).map((row) => ({
                     name: dimensionLabel(row.name, "project"),
@@ -819,7 +822,7 @@ function Dashboard() {
             </div>
 
             <div className="grid gap-3 md:grid-cols-2">
-              <Card title="Top models" note="Summed turn duration per model" icon="model">
+              <Card title="Top models" note="Summed turn duration per model" icon="cpu">
                 {data.models.length === 0 ? (
                   <Empty>No model attribution yet.</Empty>
                 ) : (
@@ -832,7 +835,7 @@ function Dashboard() {
                       .map((row) => (
                         <li key={`${row.providerId}-${row.model}`} className="flex items-center justify-between gap-3 py-2">
                           <div className="flex min-w-0 items-center gap-2">
-                            <ProviderLogo providerId={row.providerId} />
+                            <ProviderLogo id={modelLogoId(row.model) ?? providerLogoId(row.providerId)} size="sm" />
                             <span className="text-foreground truncate text-[13px] font-medium"
                               data-wk-tooltip={shortModel(row.model)} tabIndex={0}>{shortModel(row.model)}</span>
                             <span className="text-muted-foreground shrink-0 text-[11px] opacity-70"
@@ -845,7 +848,7 @@ function Dashboard() {
                 )}
               </Card>
 
-              <Card title="Rhythm" icon="clock">
+              <Card title="Rhythm" icon="gauge">
                 <Rows items={[
                   { label: "Typical turn", value: formatDuration(data.pace.medianTurnMs) },
                   { label: "Slowest 10%", value: formatDuration(data.pace.p90TurnMs) },
@@ -861,7 +864,7 @@ function Dashboard() {
             </div>
 
             {data.machines.length > 0 ? (
-              <Card title="Machines" note="Union of active thread time per machine" icon="machine">
+              <Card title="Machines" note="Union of active thread time per machine" icon="monitor">
                 <ul className="flex flex-wrap gap-2">
                   {data.machines.slice(0, 6).map((row) => (
                     <li

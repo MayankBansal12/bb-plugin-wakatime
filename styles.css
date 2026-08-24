@@ -18,34 +18,13 @@
   box-sizing: border-box;
 }
 
-/* Keep the dashboard fluid in wide panels. The old max-width left a large,
- * unusable gutter and also caused ResponsiveContainer to measure too small. */
+/* Cap the dashboard at a comfortable reading width and centre it. Charts
+ * measure fine inside this because each one owns a definite height. */
 [data-wk-root] .wk-dashboard-shell {
   width: 100%;
-  max-width: none;
-  margin-inline: 0;
+  max-width: 56rem;
+  margin-inline: auto;
 }
-
-.wk-provider-logo {
-  display: inline-flex;
-  width: 20px;
-  height: 20px;
-  flex: 0 0 20px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--muted);
-  color: var(--foreground);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.wk-provider-logo[data-provider="claude"] { color: #c56a3b; }
-.wk-provider-logo[data-provider="codex"] { color: var(--wk-machine-dot); }
-.wk-provider-logo[data-provider="opencode"] { color: #6f8fd8; }
-.wk-provider-logo[data-provider="pi"] { color: #a477c7; }
 
 /* HTML labels get a real, keyboard-accessible tooltip. This intentionally
  * avoids popover/@starting-style so it also works in older Firefox webviews. */

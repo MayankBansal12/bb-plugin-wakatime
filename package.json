@@ -13,9 +13,9 @@
   },
   "bb": {
     "name": "WakaTime",
-    "description": "Time tracking for bb — working time by project, machine, and model.",
+    "description": "Time tracking for bb \u2014 working time by project, machine, and model.",
     "branding": {
-      "icon": "Clock"
+      "icon": "./icons/wakatime.svg"
     },
     "server": "./server.ts",
     "app": "./app.tsx"
