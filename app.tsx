@@ -138,7 +138,7 @@ function ActivityChart({ days }: { days: Summary["days"] }) {
     <div className="waka-chart-wrap" tabIndex={chartDays.length > 14 ? 0 : undefined}
       aria-label={chartDays.length > 14 ? "Scrollable activity chart" : undefined}>
       <svg className="waka-activity-chart" viewBox={`0 0 ${width} ${height}`}
-        style={{ minWidth: chartDays.length > 14 ? `${Math.min(1100, Math.max(560, chartDays.length * 18))}px` : undefined }}
+        style={{ minWidth: `${chartDays.length > 14 ? Math.min(1100, Math.max(560, chartDays.length * 18)) : 520}px` }}
         role="img" aria-labelledby={`${titleId} ${descriptionId}`}>
         <title id={titleId}>Activity over time</title>
         <desc id={descriptionId}>Daily unioned working time, unioned agent coverage, and summed agent runtime.</desc>
@@ -307,6 +307,7 @@ function Dashboard() {
 
   const changeRange = (nextRange: RangeKey) => {
     if (nextRange === range) return;
+    requestGeneration.current += 1;
     setRange(nextRange);
     setData(null);
     setError(null);
