@@ -17,6 +17,11 @@ Time tracking for [bb](https://getbb.app) — like WakaTime, but for your AI age
   plus swarm time with two or more turns running.
 - **Rhythm** — median/p90 turn duration, turns per active hour, streaks,
   busiest day, and working time not covered by an observed turn.
+- **Daily shape** — unioned working time bucketed by local hour of day and by
+  weekday, so a session crossing midnight is charged to both sides.
+- **Trend** — the same totals for the equal-length window immediately before the
+  selected one, which the dashboard shows as a change against it. "All time" has
+  no window before it, so it reports no change.
 
 Threads waiting for a permission approval still count as active working time.
 Model attribution is sampled near live turn starts because bb's persisted turn

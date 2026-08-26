@@ -3,6 +3,7 @@ import {
   aggregateAnalytics,
   concurrencyStats,
   crashRecoveryEnd,
+  activityProfile,
   percentile,
   unionIntervals,
   unionMs,
@@ -147,5 +148,49 @@ describe("recovery and percentiles", () => {
     expect(percentile([10], 0.5)).toBe(10);
     expect(percentile([10, 20, 30, 40], 0.5)).toBe(25);
     expect(percentile([10, 20, 30, 40, 50], 0.9)).toBe(50);
+  });
+});
+
+describe("activity profile", () => {
+  const hour = 60 * minute;
+
+  it("splits a session across the local hours it actually occupied", () => {
+    // 22:30 on Aug 20 through 01:30 on Aug 21
+    const start = base + 22 * hour + 30 * minute;
+    const profile = activityProfile([{ start, end: start + 3 * hour }], base, base + 2 * 24 * hour);
+
+    expect(profile.hours[22]).toBe(30 * minute);
+    expect(profile.hours[23]).toBe(hour);
+    expect(profile.hours[0]).toBe(hour);
+    expect(profile.hours[1]).toBe(30 * minute);
+    expect(profile.hours.reduce((sum, value) => sum + value, 0)).toBe(3 * hour);
+  });
+
+  it("charges each side of midnight to its own weekday", () => {
+    const start = base + 23 * hour;
+    const profile = activityProfile([{ start, end: start + 2 * hour }], base, base + 2 * 24 * hour);
+
+    // Aug 20 2026 is a Thursday, so the spillover lands on Friday
+    expect(profile.weekdays[4]).toBe(hour);
+    expect(profile.weekdays[5]).toBe(hour);
+  });
+
+  it("counts overlapping sessions once, like every other working-time figure", () => {
+    const start = base + 9 * hour;
+    const profile = activityProfile(
+      [{ start, end: start + hour }, { start: start + 30 * minute, end: start + 90 * minute }],
+      base,
+      base + 24 * hour,
+    );
+
+    expect(profile.hours[9]).toBe(hour);
+    expect(profile.hours[10]).toBe(30 * minute);
+  });
+
+  it("is empty when nothing overlaps the window", () => {
+    const profile = activityProfile([], base, base + 24 * hour);
+    expect(profile.hours).toHaveLength(24);
+    expect(profile.weekdays).toHaveLength(7);
+    expect(profile.hours.every((value) => value === 0)).toBe(true);
   });
 });
