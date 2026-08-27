@@ -7,7 +7,7 @@ const url = "file://" + path.join(dir, "index.html");
 const [, , outPrefix, theme] = process.argv;
 
 const browser = await chromium.launch();
-for (const width of [820, 1180]) {
+for (const width of (process.env.WK_WIDTHS ? process.env.WK_WIDTHS.split(",").map(Number) : [820, 1180])) {
   const page = await browser.newPage({
     viewport: { width, height: 1400 },
     deviceScaleFactor: 2,

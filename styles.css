@@ -11,6 +11,7 @@
   --wk-accent-ink: #1a6b49;
   --wk-accent-wash: #f2faf6;
   --wk-accent-edge: #d8ede3;
+  --wk-hero-rule: #dfeee6;
   --wk-track: #edf0ef;
   --wk-machine-dot: #2f9e6a;
   --wk-tooltip-bg: #1f2221;
@@ -27,6 +28,7 @@
   --wk-accent-ink: #45c98b;
   --wk-accent-wash: #17231d;
   --wk-accent-edge: #24382e;
+  --wk-hero-rule: #253730;
   --wk-track: #2a2c2b;
   --wk-machine-dot: #2eae74;
   --wk-l0: #2b2d2c;
@@ -63,12 +65,36 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+/* Paired panels size to their own content. Equalising them only moves the
+ * difference inside the shorter card, where an empty block reads as a panel
+ * that failed to load rather than as one with less to say. */
 [data-wk-root] .wk-duo {
   align-items: start;
 }
 
 [data-wk-root] .wk-hero-grid {
   gap: 20px;
+}
+
+/* The headline column is a full-height flex column so its qualifying figures
+ * can sit on the floor of the card, level with the chart's day labels, instead
+ * of trailing off under the big number with dead space beneath them. */
+[data-wk-root] .wk-hero-figure {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+[data-wk-root] .wk-hero-meta {
+  display: grid;
+  width: 100%;
+  margin: auto 0 0;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--wk-hero-rule);
+  gap: 2px 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  list-style: none;
 }
 
 @media (min-width: 768px) {
@@ -84,9 +110,13 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  /* the daily chart takes two of the hero's three columns */
+  /* The daily chart takes two of the hero's three columns, with a hairline
+   * between the two so the number and the series read as separate claims about
+   * the same range rather than as one run-on block. */
   [data-wk-root] .wk-hero-chart {
     grid-column: span 2;
+    padding-left: 20px;
+    border-left: 1px solid var(--wk-hero-rule);
   }
 }
 

@@ -209,7 +209,7 @@ function dimensionLabel(value: string, kind: "project" | "machine"): string {
 
 type IconName =
   | "bot" | "calendar" | "chart" | "clock" | "cpu" | "flame" | "folder"
-  | "gauge" | "layers" | "monitor" | "moon" | "stopwatch" | "turns";
+  | "gauge" | "layers" | "monitor" | "moon" | "turns";
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
   bot: <><rect x="4" y="8" width="16" height="12" rx="3" /><path d="M12 4v4M9 13h.01M15 13h.01M10 17h4" /><path d="M2 13v2M22 13v2" /></>,
@@ -223,7 +223,6 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
   layers: <><path d="m12 3 8.5 4.5L12 12 3.5 7.5 12 3Z" /><path d="m4 12 8 4.3 8-4.3" /><path d="m4 16.5 8 4.3 8-4.3" /></>,
   monitor: <><rect x="3" y="4" width="18" height="12" rx="2.5" /><path d="M9 20h6M12 16v4" /></>,
   moon: <><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z" /></>,
-  stopwatch: <><circle cx="12" cy="13.5" r="7.5" /><path d="M9.5 2h5M18.6 5.4 20 6.8M12 9.5v4l2.4 2.4" /></>,
   turns: <><path d="M4 9h11a4 4 0 0 1 0 8h-3" /><path d="m8 13-3.5 4L8 21" /><path d="m16 3 3.5 4L16 11" /></>,
 };
 
@@ -519,15 +518,39 @@ function MeterList({ rows, emptyLabel, total }: {
 
 /* ------------------------------------------------------------------ charts */
 
-/** GitHub-style daily activity heatmap over the trailing 53 weeks. */
-const CELL = 10;
-const CELL_GAP = 3;
-const PITCH = CELL + CELL_GAP;
+/*
+ * Heatmap geometry. A year is always 53 columns, so a fixed cell size left a
+ * ragged strip of empty panel to the right of the last week on wide layouts.
+ * The cell grows to fill instead, and whatever an integer cell size cannot use
+ * is handed to the column gaps — cells stay on whole pixels, which is what the
+ * eye actually reads, and the year ends flush with the panel edge.
+ */
+const CELL_MIN = 10;
+const CELL_MAX = 14;
+const GAP_MIN = 3;
+const GAP_MAX = 5;
+const LEGEND_CELL = 10;
 const WEEKDAY_COL = 30;
 const LABEL_GAP = 6;
+const MONTH_ROW = 14;
 
+type HeatmapGeometry = { cell: number; gap: number };
+
+function heatmapGeometry(width: number): HeatmapGeometry {
+  const fallback = { cell: CELL_MIN, gap: GAP_MIN };
+  if (!(width > 0)) return fallback;
+  const fitted = Math.floor((width - (HEATMAP_WEEKS - 1) * GAP_MIN) / HEATMAP_WEEKS);
+  // Too narrow for the smallest legible cell: keep the floor and let it scroll.
+  if (fitted < CELL_MIN) return fallback;
+  const cell = Math.min(CELL_MAX, fitted);
+  const slack = (width - HEATMAP_WEEKS * cell) / (HEATMAP_WEEKS - 1);
+  return { cell, gap: Math.min(GAP_MAX, Math.max(GAP_MIN, slack)) };
+}
+
+/** GitHub-style daily activity heatmap over the trailing 53 weeks. */
 function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezone: string; index?: number }) {
   const [hoveredCell, setHoveredCell] = useState<{ text: string; x: number; y: number } | null>(null);
+  const [{ cell, gap }, setGeometry] = useState<HeatmapGeometry>({ cell: CELL_MIN, gap: GAP_MIN });
   const scrollRef = useRef<HTMLDivElement>(null);
   const { weeks, months, thresholds, activeDays } = useMemo(() => {
     const byDate = new Map(days.map((day) => [day.date, day]));
@@ -585,7 +608,27 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
     return 4;
   };
 
-  const cellsWidth = HEATMAP_WEEKS * PITCH - CELL_GAP;
+  const pitch = cell + gap;
+  const cellsWidth = HEATMAP_WEEKS * pitch - gap;
+
+  // Measured off the scroller, whose width comes from the panel rather than
+  // from its own content, so resizing the cells cannot feed back into it.
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const measure = () => {
+      const next = heatmapGeometry(scroller.clientWidth);
+      setGeometry((current) => (current.cell === next.cell && current.gap === next.gap ? current : next));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", measure);
+      return () => window.removeEventListener("resize", measure);
+    }
+    const observer = new ResizeObserver(measure);
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const scroller = scrollRef.current;
@@ -613,7 +656,7 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
           {[0, 1, 2, 3, 4].map((level) => (
             <span
               key={level}
-              style={{ width: CELL, height: CELL, borderRadius: 2, backgroundColor: `var(--wk-l${level})` }}
+              style={{ width: LEGEND_CELL, height: LEGEND_CELL, borderRadius: 2, backgroundColor: `var(--wk-l${level})` }}
             />
           ))}
           more
@@ -625,13 +668,13 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
         {/* Weekday gutter lives outside the scroller: inside it, scrolling to
             the most recent week slid these labels out of view. */}
         <div style={{ flex: "none", width: WEEKDAY_COL, paddingRight: LABEL_GAP }}>
-          <div style={{ height: 14, marginBottom: CELL_GAP }} aria-hidden="true" />
-          <div className="grid" style={{ gridTemplateRows: `repeat(7, ${CELL}px)`, rowGap: CELL_GAP }}>
+          <div style={{ height: MONTH_ROW, marginBottom: GAP_MIN }} aria-hidden="true" />
+          <div className="grid" style={{ gridTemplateRows: `repeat(7, ${cell}px)`, rowGap: GAP_MIN }}>
             {["", "Mon", "", "Wed", "", "Fri", ""].map((label, cellIndex) => (
               <span
                 key={cellIndex}
                 className="text-muted-foreground text-right opacity-70"
-                style={{ fontSize: 10, lineHeight: `${CELL}px` }}
+                style={{ fontSize: 10, lineHeight: `${cell}px` }}
               >
                 {label}
               </span>
@@ -646,11 +689,11 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
         >
           <div style={{ width: cellsWidth }}>
             {/* month row: absolutely placed so each label sits over its own column */}
-            <div className="relative" style={{ height: 14, marginBottom: CELL_GAP }}>
+            <div className="relative" style={{ height: MONTH_ROW, marginBottom: GAP_MIN }}>
               {months.map((month) => (
                 <span key={`${month.label}-${month.index}`}
                   className="text-muted-foreground absolute top-0 opacity-70"
-                  style={{ left: month.index * PITCH, fontSize: 10, lineHeight: "14px" }}>
+                  style={{ left: month.index * pitch, fontSize: 10, lineHeight: `${MONTH_ROW}px` }}>
                   {month.label}
                 </span>
               ))}
@@ -660,29 +703,29 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
               className="grid"
               style={{
                 gridAutoFlow: "column",
-                gridTemplateRows: `repeat(7, ${CELL}px)`,
-                gridAutoColumns: `${CELL}px`,
-                columnGap: CELL_GAP,
-                rowGap: CELL_GAP,
+                gridTemplateRows: `repeat(7, ${cell}px)`,
+                gridAutoColumns: `${cell}px`,
+                columnGap: gap,
+                rowGap: GAP_MIN,
               }}
             >
               {weeks.flatMap((column, weekIndex) =>
-                column.map((cell) =>
-                  cell.future ? (
-                    <span key={cell.date} style={{ width: CELL, height: CELL }} />
+                column.map((day) =>
+                  day.future ? (
+                    <span key={day.date} style={{ width: cell, height: cell }} />
                   ) : (
                     <span
-                      key={cell.date}
-                      aria-label={`${formatDate(cell.date, true)}, ${formatDuration(cell.workingMs)}${cell.turnCount > 0 ? `, ${cell.turnCount} turns` : ""}`}
+                      key={day.date}
+                      aria-label={`${formatDate(day.date, true)}, ${formatDuration(day.workingMs)}${day.turnCount > 0 ? `, ${day.turnCount} turns` : ""}`}
                       onMouseEnter={(event) => showCellTooltip(event.currentTarget, event.currentTarget.getAttribute("aria-label") ?? "")}
                       onMouseMove={(event) => showCellTooltip(event.currentTarget, event.currentTarget.getAttribute("aria-label") ?? "", event.clientX, event.clientY - 10)}
                       onMouseLeave={() => setHoveredCell(null)}
                       className="wk-heat-cell"
                       style={{
-                        width: CELL,
-                        height: CELL,
+                        width: cell,
+                        height: cell,
                         borderRadius: 2,
-                        backgroundColor: `var(--wk-l${levelOf(cell.workingMs)})`,
+                        backgroundColor: `var(--wk-l${levelOf(day.workingMs)})`,
                         // the year fills in left to right, a column at a time
                         animationDelay: `${weekIndex * 7}ms`,
                       }}
@@ -1024,46 +1067,35 @@ function Dashboard() {
   const projectTotal = data?.projects.reduce((sum, project) => sum + project.workingMs, 0) ?? 0;
   const activeDays = data?.days.filter((day) => day.workingMs > 0).length ?? 0;
   const live = (data?.quality.openSessionCount ?? 0) > 0;
+  const heroMeta = data
+    ? [
+        { value: formatCount(data.turnCount), label: data.turnCount === 1 ? "turn" : "turns" },
+        { value: formatCount(data.projects.length), label: data.projects.length === 1 ? "project" : "projects" },
+        { value: formatCount(activeDays), label: activeDays === 1 ? "active day" : "active days" },
+      ]
+    : [];
 
   return (
     <main className="h-full overflow-y-auto" data-wk-root>
       <div className="wk-dashboard-shell flex w-full flex-col gap-3 p-4">
-        <header className="flex items-center justify-between gap-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <span
-              aria-hidden="true"
-              className="flex items-center justify-center rounded-lg border"
-              style={{
-                flex: "none",
-                width: 32,
-                height: 32,
-                borderColor: "var(--wk-accent-edge)",
-                backgroundColor: "var(--wk-accent-wash)",
-                color: "var(--wk-accent)",
-              }}
-            >
-              <Icon name="stopwatch" size={18} />
-            </span>
-            <div className="min-w-0">
-              <h1 className="text-foreground truncate font-semibold tracking-tight" style={{ fontSize: 15, lineHeight: "20px" }}>
-                Activity
-              </h1>
-              <p className="text-muted-foreground flex items-center gap-2 truncate text-xs opacity-75">
-                {live ? (
-                  <>
-                    <span className="relative flex" style={{ flex: "none", width: 6, height: 6 }}>
-                      <span className="wk-live absolute inset-0 rounded-full" />
-                      <span className="rounded-full" style={{ width: 6, height: 6, backgroundColor: "var(--wk-accent)" }} />
-                    </span>
-                    Tracking now
-                  </>
-                ) : (
-                  "Local only"
-                )}
-                {data ? ` · ${data.range.timezone}` : ""}
-              </p>
-            </div>
-          </div>
+        {/* The panel already carries the plugin's name and mark in bb's own
+            chrome, so this row holds only what that chrome cannot say: whether
+            data is arriving right now, and which window is on screen. */}
+        <header className="flex items-center justify-between gap-3" style={{ minHeight: 30 }}>
+          <p className="text-muted-foreground flex min-w-0 items-center gap-2 truncate text-xs opacity-75">
+            {live ? (
+              <>
+                <span className="relative flex" style={{ flex: "none", width: 6, height: 6 }}>
+                  <span className="wk-live absolute inset-0 rounded-full" />
+                  <span className="rounded-full" style={{ width: 6, height: 6, backgroundColor: "var(--wk-accent)" }} />
+                </span>
+                Tracking now
+              </>
+            ) : (
+              "Local only"
+            )}
+            {data ? ` · ${data.range.timezone}` : ""}
+          </p>
           <SegmentedControl
             label="Date range"
             value={range}
@@ -1111,10 +1143,10 @@ function Dashboard() {
                 cards left the reader to join them up. */}
             <Card style={riseDelay(0)} className="wk-rise wk-hero min-w-0 p-4">
               <div className="wk-grid wk-hero-grid">
-                <div className="min-w-0">
+                <div className="wk-hero-figure min-w-0">
                   <p className="text-muted-foreground text-xs opacity-80">bb worked {rangeBlurb}</p>
                   {/* the one hero figure on the page: proportional figures, not tabular */}
-                  <p className="text-foreground mt-3 flex items-baseline gap-2 text-5xl font-semibold tracking-tight">
+                  <p className="text-foreground flex items-baseline gap-2 text-5xl font-semibold tracking-tight">
                     {heroParts.map((part) => (
                       <span key={part.unit}>
                         {part.value}
@@ -1122,28 +1154,34 @@ function Dashboard() {
                       </span>
                     ))}
                   </p>
-                  <div className="mt-4 flex flex-wrap items-center gap-2">
-                    <Delta current={data.workingMs} previous={data.previous?.workingMs ?? null} blurb={priorBlurb} />
-                  </div>
-                  <p className="text-muted-foreground mt-3 text-xs opacity-80">
-                    <span className="text-foreground font-medium">{formatCount(data.turnCount)}</span> turns ·{" "}
-                    <span className="text-foreground font-medium">{data.projects.length}</span>{" "}
-                    project{data.projects.length === 1 ? "" : "s"} ·{" "}
-                    <span className="text-foreground font-medium">{activeDays}</span> active day{activeDays === 1 ? "" : "s"}
-                  </p>
+                  <Delta current={data.workingMs} previous={data.previous?.workingMs ?? null} blurb={priorBlurb} />
+
+                  {/* The three figures that qualify the headline, given equal
+                      columns so they scan as one strip rather than a sentence
+                      that has to be read to the end. */}
+                  <ul className="wk-hero-meta">
+                    {heroMeta.map((item) => (
+                      <li key={item.label} className="min-w-0">
+                        <p className="text-foreground truncate text-sm font-medium tabular-nums">{item.value}</p>
+                        <p className="text-muted-foreground truncate opacity-70" style={{ fontSize: 11, lineHeight: "14px" }}>
+                          {item.label}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
 
                 {/* A single-day range would draw a one-bar bar chart; the hero
                     figure already is that number. */}
                 {data.days.length > 1 ? (
                   <div className="wk-hero-chart min-w-0">
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <span className="text-muted-foreground text-xs opacity-70">Daily activity</span>
+                    <div className="mb-3 flex items-baseline justify-between gap-2">
+                      <span className="text-muted-foreground text-xs opacity-80">Daily activity</span>
                       {activeDays > 0 ? (
                         <Caption>{formatDuration(data.workingMs / activeDays)} per active day</Caption>
                       ) : null}
                     </div>
-                    <DailyChart days={data.days} height={168} />
+                    <DailyChart days={data.days} height={172} />
                   </div>
                 ) : null}
               </div>
