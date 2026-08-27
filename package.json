@@ -33,6 +33,7 @@
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.2.5",
     "better-sqlite3": "^12.0.0",
     "cron-parser": "^5.5.0",
     "hono": "^4.11.9",

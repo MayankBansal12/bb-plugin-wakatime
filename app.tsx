@@ -1,6 +1,7 @@
 import { definePluginApp, useRpc } from "@get-bb/plugin-sdk/app";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useReducedMotion } from "motion/react";
 import type { rpcContract } from "./server";
 import { EvilBarChart } from "@/components/evilcharts/charts/recharts-bar-chart";
@@ -95,8 +96,9 @@ const PALETTE = {
   },
 } as const;
 
-const barConfig = {
-  value: { label: "Time", colors: { light: [PALETTE.series.light], dark: [PALETTE.series.dark] } },
+const dailyBarConfig = {
+  context: { label: "Working time", colors: { light: ["#b8dcc9"], dark: ["#22593c"] } },
+  value: { label: "Working time", colors: { light: [PALETTE.series.light], dark: [PALETTE.series.dark] } },
 } satisfies ChartConfig;
 
 const DAY_MS = 86_400_000;
@@ -164,6 +166,28 @@ function localDayKey(timestamp: number): string {
   const month = `${date.getMonth() + 1}`.padStart(2, "0");
   const day = `${date.getDate()}`.padStart(2, "0");
   return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function recentThreeDays(history: Day[], selected: Day[]): Day[] {
+  const rows = new Map([...history, ...selected].map((day) => [day.date, day]));
+  const latest = selected[selected.length - 1]?.date ?? history[history.length - 1]?.date ?? localDayKey(Date.now());
+  const anchor = new Date(`${latest}T12:00:00`);
+  return [-2, -1, 0].map((offset) => {
+    const date = new Date(anchor);
+    date.setDate(anchor.getDate() + offset);
+    const key = localDayKey(date.getTime());
+    return rows.get(key) ?? {
+      date: key,
+      workingMs: 0,
+      agentRuntimeMs: 0,
+      agentCoverageMs: 0,
+      activeMs: 0,
+      computeMs: 0,
+      coverageMs: 0,
+      turnCount: 0,
+      peakConcurrentTurns: 0,
+    };
+  });
 }
 
 /** "14" -> "2 PM", in whatever clock the viewer's locale uses. */
@@ -248,6 +272,80 @@ function Icon({ name, size = 16, className }: { name: IconName; size?: number; c
       {ICON_PATHS[name]}
     </svg>
   );
+}
+
+type FloatingTooltipState = {
+  text: string;
+  anchorX: number;
+  anchorTop: number;
+  anchorBottom: number;
+  x: number;
+  y: number;
+  above: boolean;
+  ready: boolean;
+};
+
+/**
+ * Fixed tooltips are portalled to the document body. Dashboard panels retain a
+ * transform after their entrance animation, which would otherwise turn a
+ * nested `position: fixed` tooltip into a card-relative element and make it
+ * drift or clip while hovering charts.
+ */
+function useFloatingTooltip() {
+  const [state, setState] = useState<FloatingTooltipState | null>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+
+  const showTooltip = useCallback((element: HTMLElement, text: string) => {
+    const rect = element.getBoundingClientRect();
+    const anchorX = rect.left + rect.width / 2;
+    setState({
+      text,
+      anchorX,
+      anchorTop: rect.top,
+      anchorBottom: rect.bottom,
+      x: anchorX,
+      y: rect.top - 8,
+      above: true,
+      ready: false,
+    });
+  }, []);
+
+  const hideTooltip = useCallback(() => setState(null), []);
+
+  useLayoutEffect(() => {
+    if (!state || !tooltipRef.current) return;
+    const rect = tooltipRef.current.getBoundingClientRect();
+    const gutter = 8;
+    const above = state.anchorTop - rect.height - gutter >= gutter;
+    const x = Math.min(
+      window.innerWidth - rect.width / 2 - gutter,
+      Math.max(rect.width / 2 + gutter, state.anchorX),
+    );
+    const y = above ? state.anchorTop - gutter : state.anchorBottom + gutter;
+    if (state.ready && state.x === x && state.y === y && state.above === above) return;
+    setState((current) => current ? { ...current, x, y, above, ready: true } : null);
+  }, [state]);
+
+  const tooltip = state && typeof document !== "undefined"
+    ? createPortal(
+        <div
+          ref={tooltipRef}
+          role="tooltip"
+          className="wk-floating-tooltip"
+          style={{
+            left: state.x,
+            top: state.y,
+            visibility: state.ready ? "visible" : "hidden",
+            transform: state.above ? "translate(-50%, -100%)" : "translate(-50%, 0)",
+          }}
+        >
+          {state.text}
+        </div>,
+        document.body,
+      )
+    : null;
+
+  return { showTooltip, hideTooltip, tooltip };
 }
 
 /** bb provider id -> brand mark id. Unknown providers render no mark at all. */
@@ -516,6 +614,78 @@ function MeterList({ rows, emptyLabel, total }: {
   );
 }
 
+function ModelList({ models }: { models: Summary["models"] }) {
+  if (models.length === 0) return <Empty>No model attribution yet.</Empty>;
+  return (
+    <ul className="divide-border flex flex-col divide-y">
+      {[...models]
+        .sort((a, b) => Number(isUnknown(a.model)) - Number(isUnknown(b.model)) || b.agentRuntimeMs - a.agentRuntimeMs)
+        .slice(0, 5)
+        .map((row) => (
+          <li key={`${row.providerId}-${row.model}`} className="flex items-center justify-between gap-3 py-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <ProviderLogo id={modelLogoId(row.model) ?? providerLogoId(row.providerId)} size="sm" />
+              <span className="text-foreground truncate text-sm font-medium"
+                data-wk-tooltip={shortModel(row.model)} tabIndex={0}>{shortModel(row.model)}</span>
+              <span className="text-muted-foreground text-xs opacity-70" style={{ flex: "none" }}>
+                {providerLabel(row.providerId)}
+              </span>
+            </div>
+            <div className="flex items-baseline gap-2" style={{ flex: "none" }}>
+              <span className="text-foreground text-sm font-medium tabular-nums">
+                {formatDuration(row.agentRuntimeMs)}
+              </span>
+              <span className="text-muted-foreground text-right text-xs tabular-nums opacity-60"
+                style={{ whiteSpace: "nowrap" }}>
+                {formatCount(row.turnCount)} turns
+              </span>
+            </div>
+          </li>
+        ))}
+    </ul>
+  );
+}
+
+function MachineList({ machines }: { machines: Breakdown[] }) {
+  const total = machines.reduce((sum, machine) => sum + machine.workingMs, 0);
+  const rows = machines.slice(0, 6);
+  return (
+    <ul className={cn("wk-machine-grid grid gap-2", rows.length === 1 && "wk-machine-grid-single")}>
+      {rows.map((row, index) => {
+        const percent = total > 0 ? Math.round((row.workingMs / total) * 100) : 0;
+        const name = dimensionLabel(row.name, "machine");
+        return (
+          <li key={row.name} className="bg-muted min-w-0 rounded-lg p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <span
+                  aria-hidden="true"
+                  className="rounded-full"
+                  style={{ flex: "none", width: 7, height: 7, backgroundColor: "var(--wk-machine-dot)" }}
+                />
+                <span className="text-foreground truncate text-sm font-medium" data-wk-tooltip={name} tabIndex={0}>
+                  {name}
+                </span>
+              </div>
+              <div className="flex items-baseline gap-2" style={{ flex: "none" }}>
+                <span className="text-foreground text-sm font-medium tabular-nums">{formatDuration(row.workingMs)}</span>
+                <span className="text-muted-foreground text-xs tabular-nums opacity-60">{percent}%</span>
+              </div>
+            </div>
+            <div className="wk-meter-track mt-3 w-full overflow-hidden rounded-full" style={{ height: 4 }}>
+              <GrowBar
+                index={index}
+                className="wk-meter-fill rounded-full"
+                style={{ width: `${percent}%`, height: "100%" }}
+              />
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 /* ------------------------------------------------------------------ charts */
 
 /*
@@ -549,10 +719,10 @@ function heatmapGeometry(width: number): HeatmapGeometry {
 
 /** GitHub-style daily activity heatmap over the trailing 53 weeks. */
 function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezone: string; index?: number }) {
-  const [hoveredCell, setHoveredCell] = useState<{ text: string; x: number; y: number } | null>(null);
+  const { showTooltip, hideTooltip, tooltip } = useFloatingTooltip();
   const [{ cell, gap }, setGeometry] = useState<HeatmapGeometry>({ cell: CELL_MIN, gap: GAP_MIN });
   const scrollRef = useRef<HTMLDivElement>(null);
-  const { weeks, months, thresholds, activeDays } = useMemo(() => {
+  const { weeks, months, thresholds } = useMemo(() => {
     const byDate = new Map(days.map((day) => [day.date, day]));
 
     // End on the current week's Saturday so every column is a whole week.
@@ -564,14 +734,12 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
     const cells: Array<Array<{ date: string; workingMs: number; turnCount: number; future: boolean }>> = [];
     const monthLabels: Array<{ index: number; label: string }> = [];
     let lastMonth = -1;
-    let active = 0;
 
     for (let week = 0; week < HEATMAP_WEEKS; week += 1) {
       const column = Array.from({ length: 7 }, (_, weekday) => {
         const stamp = start + (week * 7 + weekday) * DAY_MS;
         const date = localDayKey(stamp);
         const day = byDate.get(date);
-        if ((day?.workingMs ?? 0) > 0) active += 1;
         return {
           date,
           workingMs: day?.workingMs ?? 0,
@@ -597,7 +765,7 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
     const worked = days.map((day) => day.workingMs).filter((value) => value > 0).sort((a, b) => a - b);
     const at = (fraction: number) =>
       worked.length === 0 ? 0 : worked[Math.min(worked.length - 1, Math.floor(worked.length * fraction))]!;
-    return { weeks: cells, months: monthLabels, thresholds: [at(0.25), at(0.5), at(0.75)], activeDays: active };
+    return { weeks: cells, months: monthLabels, thresholds: [at(0.25), at(0.5), at(0.75)] };
   }, [days]);
 
   const levelOf = (workingMs: number): number => {
@@ -635,15 +803,6 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
     if (scroller) scroller.scrollLeft = scroller.scrollWidth - scroller.clientWidth;
   }, [cellsWidth]);
 
-  const showCellTooltip = (element: HTMLElement, text: string, x?: number, y?: number) => {
-    const rect = element.getBoundingClientRect();
-    setHoveredCell({
-      text,
-      x: Math.min(window.innerWidth - 12, Math.max(12, x ?? rect.left + rect.width / 2)),
-      y: Math.max(12, y ?? rect.top),
-    });
-  };
-
   return (
     <Panel
       index={index}
@@ -663,7 +822,6 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
         </span>
       }
     >
-      <p className="text-muted-foreground mb-3 text-xs opacity-70">{activeDays} active days this year</p>
       <div className="flex">
         {/* Weekday gutter lives outside the scroller: inside it, scrolling to
             the most recent week slid these labels out of view. */}
@@ -717,9 +875,8 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
                     <span
                       key={day.date}
                       aria-label={`${formatDate(day.date, true)}, ${formatDuration(day.workingMs)}${day.turnCount > 0 ? `, ${day.turnCount} turns` : ""}`}
-                      onMouseEnter={(event) => showCellTooltip(event.currentTarget, event.currentTarget.getAttribute("aria-label") ?? "")}
-                      onMouseMove={(event) => showCellTooltip(event.currentTarget, event.currentTarget.getAttribute("aria-label") ?? "", event.clientX, event.clientY - 10)}
-                      onMouseLeave={() => setHoveredCell(null)}
+                      onMouseEnter={(event) => showTooltip(event.currentTarget, event.currentTarget.getAttribute("aria-label") ?? "")}
+                      onMouseLeave={hideTooltip}
                       className="wk-heat-cell"
                       style={{
                         width: cell,
@@ -737,18 +894,13 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
           </div>
         </div>
       </div>
-      {hoveredCell ? (
-        <div role="tooltip" className="wk-graph-tooltip"
-          style={{ left: hoveredCell.x, top: hoveredCell.y, transform: "translate(-50%, -100%)" }}>
-          {hoveredCell.text}
-        </div>
-      ) : null}
+      {tooltip}
     </Panel>
   );
 }
 
 /** Daily working time. Bars, not an area — one day is still a readable chart. */
-function DailyChart({ days, height }: { days: Day[]; height: number }) {
+function DailyChart({ days, height, focusLast = false }: { days: Day[]; height: number; focusLast?: boolean }) {
   const data = useMemo(() => {
     const bucketSize = Math.max(1, Math.ceil(days.length / 31));
     const buckets = bucketSize === 1 ? days.map((day) => ({ from: day.date, to: day.date, day })) : Array.from(
@@ -765,15 +917,22 @@ function DailyChart({ days, height }: { days: Day[]; height: number }) {
         };
       },
     );
-    return buckets.map((bucket) => ({
-      label: bucket.from === bucket.to ? formatDate(bucket.from) : `${formatDate(bucket.from)}–${formatDate(bucket.to)}`,
-      value: bucket.day.workingMs,
-      turns: bucket.day.turnCount,
-    }));
-  }, [days]);
+    return buckets.map((bucket, index) => {
+      const focused = !focusLast || index === buckets.length - 1;
+      return {
+        label: focusLast && index === buckets.length - 1
+          ? "Today"
+          : bucket.from === bucket.to ? formatDate(bucket.from) : `${formatDate(bucket.from)}–${formatDate(bucket.to)}`,
+        value: focused ? bucket.day.workingMs : undefined,
+        context: focused ? undefined : bucket.day.workingMs,
+        total: bucket.day.workingMs,
+        turns: bucket.day.turnCount,
+      };
+    });
+  }, [days, focusLast]);
 
   const scale = useMemo(
-    () => hourTicks(Math.max(0, ...data.map((point) => point.value))),
+    () => hourTicks(Math.max(0, ...data.map((point) => point.total))),
     [data],
   );
 
@@ -785,7 +944,8 @@ function DailyChart({ days, height }: { days: Day[]; height: number }) {
     <div style={{ height, width: "100%" }}>
       <EvilBarChart
         data={data}
-        config={barConfig}
+        config={dailyBarConfig}
+        stackType="stacked"
         barRadius={4}
         barCategoryGap={data.length > 14 ? 2 : 8}
         className="aspect-auto h-full w-full"
@@ -809,13 +969,14 @@ function DailyChart({ days, height }: { days: Day[]; height: number }) {
           ticks={scale.ticks}
           tickFormatter={(value: unknown) => (toMs(value) === 0 ? "0" : formatTight(toMs(value)))}
         />
-        <EvilBarChart.Tooltip formatter={(value: unknown, _name: unknown, item: { payload?: { turns?: number } }) => (
+        <EvilBarChart.Tooltip labelFormatter={(label) => label} formatter={(value: unknown, _name: unknown, item: { payload?: { turns?: number } }) => (
           <div className="flex min-w-40 items-center justify-between gap-4">
             <span className="text-muted-foreground">Working time</span>
             <span className="text-foreground font-medium tabular-nums">{formatDuration(toMs(value))}</span>
             {item.payload?.turns ? <span className="text-muted-foreground">{item.payload.turns} turns</span> : null}
           </div>
         )} />
+        <EvilBarChart.Bar dataKey="context" variant="default" radius={4} barProps={{ maxBarSize: 24 }} />
         <EvilBarChart.Bar dataKey="value" variant="default" radius={4} barProps={{ maxBarSize: 24 }} />
       </EvilBarChart>
     </div>
@@ -830,6 +991,7 @@ const PLOT_HEIGHT = 96;
  * a full-height hit target above a bar that may only be a few pixels tall.
  */
 function HourProfile({ hours }: { hours: number[] }) {
+  const { showTooltip, hideTooltip, tooltip } = useFloatingTooltip();
   const max = Math.max(...hours, 1);
   const total = hours.reduce((sum, value) => sum + value, 0);
   const peak = hours.indexOf(max);
@@ -838,34 +1000,41 @@ function HourProfile({ hours }: { hours: number[] }) {
 
   return (
     <div>
-      <div className="flex items-end" style={{ height: PLOT_HEIGHT, gap: 2 }}>
-        {hours.map((value, hour) => (
-          <div
-            key={hour}
-            tabIndex={0}
-            className="wk-hour-col flex h-full min-w-0 flex-1 flex-col justify-end"
-            style={{ cursor: "default" }}
-            data-wk-tooltip={`${formatHour(hour)} – ${formatHour((hour + 1) % 24)} · ${formatDuration(value)}`}
-          >
+      <div className="wk-hour-profile flex items-end" style={{ height: PLOT_HEIGHT, gap: 2 }}>
+        {hours.map((value, hour) => {
+          const label = `${formatHour(hour)} – ${formatHour((hour + 1) % 24)} · ${formatDuration(value)}`;
+          return (
             <div
-              className="wk-hour-bar wk-grow-y w-full"
-              style={{
-                height: value > 0 ? Math.max(3, (value / max) * PLOT_HEIGHT) : 2,
-                borderRadius: "3px 3px 0 0",
-                backgroundColor: value > 0
-                  ? (hour === peak ? "var(--wk-accent-ink)" : "var(--wk-accent)")
-                  : "var(--wk-track)",
-                transition: "background-color 150ms ease-out",
-                animationDelay: `${100 + hour * 12}ms`,
-              }}
-            />
-          </div>
-        ))}
+              key={hour}
+              tabIndex={0}
+              aria-label={label}
+              className="wk-hour-col flex h-full min-w-0 flex-1 flex-col justify-end"
+              style={{ cursor: "default" }}
+              onMouseEnter={(event) => showTooltip(event.currentTarget, label)}
+              onMouseLeave={hideTooltip}
+              onFocus={(event) => showTooltip(event.currentTarget, label)}
+              onBlur={hideTooltip}
+            >
+              <div
+                className="wk-hour-bar wk-grow-y w-full"
+                style={{
+                  height: value > 0 ? Math.max(3, (value / max) * PLOT_HEIGHT) : 2,
+                  borderRadius: "3px 3px 0 0",
+                  "--wk-hour-color": value > 0
+                    ? (hour === peak ? "var(--wk-accent-ink)" : "var(--wk-accent)")
+                    : "var(--wk-track)",
+                  animationDelay: `${100 + hour * 12}ms`,
+                } as CSSProperties}
+              />
+            </div>
+          );
+        })}
       </div>
       <div className="text-muted-foreground mt-2 flex justify-between opacity-70" style={{ fontSize: 10 }}>
         {[0, 6, 12, 18].map((hour) => <span key={hour}>{formatHour(hour)}</span>)}
         <span>{formatHour(23)}</span>
       </div>
+      {tooltip}
     </div>
   );
 }
@@ -875,6 +1044,7 @@ function HourProfile({ hours }: { hours: number[] }) {
  * scale, so it takes the one-hue ordinal ramp rather than categorical hues.
  */
 function SwarmBar({ distribution }: { distribution: Array<{ concurrentTurns: number; durationMs: number }> }) {
+  const { showTooltip, hideTooltip, tooltip } = useFloatingTooltip();
   const buckets = useMemo(() => {
     const rows = [0, 0, 0, 0];
     for (const entry of distribution) {
@@ -895,15 +1065,22 @@ function SwarmBar({ distribution }: { distribution: Array<{ concurrentTurns: num
   return (
     <div>
       {/* the 2px gaps are the card surface showing through — no strokes on the marks */}
-      <div className="bg-card flex w-full overflow-hidden" style={{ height: 10, gap: 2, borderRadius: 6 }}>
+      <div className="wk-swarm-track bg-card flex w-full" style={{ height: 10, gap: 2, borderRadius: 6 }}>
         {shown.map((bucket, index) => (
-          <GrowBar
+          <span
             key={bucket.label}
-            index={index}
+            tabIndex={0}
+            aria-label={`${bucket.label}, ${formatDuration(bucket.durationMs)}, ${Math.round((bucket.durationMs / total) * 100)}%`}
+            className="wk-swarm-segment wk-grow-x"
+            onMouseEnter={(event) => showTooltip(event.currentTarget, event.currentTarget.getAttribute("aria-label") ?? "")}
+            onMouseLeave={hideTooltip}
+            onFocus={(event) => showTooltip(event.currentTarget, event.currentTarget.getAttribute("aria-label") ?? "")}
+            onBlur={hideTooltip}
             style={{
               height: "100%",
               width: `${(bucket.durationMs / total) * 100}%`,
               backgroundColor: `var(--wk-l${bucket.level})`,
+              animationDelay: `${80 + Math.min(index, 8) * 40}ms`,
               borderTopLeftRadius: index === 0 ? 6 : 0,
               borderBottomLeftRadius: index === 0 ? 6 : 0,
               borderTopRightRadius: index === shown.length - 1 ? 6 : 0,
@@ -931,6 +1108,7 @@ function SwarmBar({ distribution }: { distribution: Array<{ concurrentTurns: num
           </div>
         ))}
       </dl>
+      {tooltip}
     </div>
   );
 }
@@ -952,16 +1130,44 @@ function Rows({ items }: { items: Array<{ label: string; value: string; hint?: s
 }
 
 function LoadingState() {
+  const barHeights = [30, 54, 42, 78, 62, 104, 86, 124, 94, 148, 116, 138];
   return (
     <div className="flex flex-col gap-3" aria-live="polite" aria-busy="true">
       <span className="sr-only">Loading bb activity</span>
-      <div className="bg-muted animate-pulse rounded-lg" style={{ height: 216 }} />
+      <Card className="min-w-0 p-4" style={{ height: 216 }}>
+        <div className="wk-grid wk-hero-grid h-full">
+          <div className="flex flex-col gap-3">
+            <span className="wk-skeleton rounded" style={{ width: 84, height: 10 }} />
+            <span className="wk-skeleton rounded-md" style={{ width: 150, height: 42 }} />
+            <span className="wk-skeleton rounded-full" style={{ width: 104, height: 22 }} />
+            <div className="mt-auto grid grid-cols-3 gap-3">
+              {[54, 62, 48].map((width) => <span key={width} className="wk-skeleton rounded" style={{ width, height: 24 }} />)}
+            </div>
+          </div>
+          <div className="wk-hero-chart flex min-w-0 items-end gap-2" aria-hidden="true">
+            {barHeights.map((barHeight, index) => (
+              <span key={index} className="wk-skeleton min-w-0 flex-1 rounded-t" style={{ height: barHeight }} />
+            ))}
+          </div>
+        </div>
+      </Card>
       <div className="wk-grid wk-tiles">
         {Array.from({ length: 4 }, (_, index) => (
-          <div className="bg-muted animate-pulse rounded-lg" style={{ height: 104 }} key={index} />
+          <Card className="flex flex-col gap-3 p-4" style={{ height: 112 }} key={index}>
+            <span className="wk-skeleton rounded" style={{ width: 70 + index * 8, height: 10 }} />
+            <span className="wk-skeleton rounded-md" style={{ width: 80, height: 26 }} />
+            <span className="wk-skeleton mt-auto rounded" style={{ width: "100%", height: 8 }} />
+          </Card>
         ))}
       </div>
-      <div className="bg-muted animate-pulse rounded-lg" style={{ height: 160 }} />
+      <Card className="flex flex-col gap-4 p-4" style={{ height: 160 }}>
+        <span className="wk-skeleton rounded" style={{ width: 106, height: 12 }} />
+        <div className="grid flex-1 grid-cols-12 items-end gap-2" aria-hidden="true">
+          {barHeights.map((barHeight, index) => (
+            <span key={index} className="wk-skeleton rounded-sm" style={{ height: Math.max(12, barHeight * 0.58) }} />
+          ))}
+        </div>
+      </Card>
     </div>
   );
 }
@@ -1051,13 +1257,6 @@ function Dashboard() {
       .sort((a, b) => Number(a.unattributed) - Number(b.unattributed) || b.value - a.value);
   }, [data]);
 
-  const topModel = useMemo(() => {
-    if (!data || data.models.length === 0) return null;
-    return [...data.models]
-      .filter((row) => !isUnknown(row.model))
-      .sort((a, b) => b.agentRuntimeMs - a.agentRuntimeMs)[0] ?? null;
-  }, [data]);
-
   const option = RANGES.find((entry) => entry.key === range);
   const rangeBlurb = option?.blurb ?? "";
   const priorBlurb = option?.priorBlurb ?? "";
@@ -1074,28 +1273,24 @@ function Dashboard() {
         { value: formatCount(activeDays), label: activeDays === 1 ? "active day" : "active days" },
       ]
     : [];
+  const dailyDays = data
+    ? (range === "today" ? recentThreeDays(history?.days ?? [], data.days) : data.days)
+    : [];
 
   return (
     <main className="h-full overflow-y-auto" data-wk-root>
       <div className="wk-dashboard-shell flex w-full flex-col gap-3 p-4">
-        {/* The panel already carries the plugin's name and mark in bb's own
-            chrome, so this row holds only what that chrome cannot say: whether
-            data is arriving right now, and which window is on screen. */}
         <header className="flex items-center justify-between gap-3" style={{ minHeight: 30 }}>
-          <p className="text-muted-foreground flex min-w-0 items-center gap-2 truncate text-xs opacity-75">
+          <div className="flex min-w-0 items-center gap-2">
+            <Icon name="clock" className="text-muted-foreground" />
+            <h1 className="text-foreground truncate text-sm font-semibold">WakaTime</h1>
             {live ? (
-              <>
-                <span className="relative flex" style={{ flex: "none", width: 6, height: 6 }}>
-                  <span className="wk-live absolute inset-0 rounded-full" />
-                  <span className="rounded-full" style={{ width: 6, height: 6, backgroundColor: "var(--wk-accent)" }} />
-                </span>
-                Tracking now
-              </>
-            ) : (
-              "Local only"
-            )}
-            {data ? ` · ${data.range.timezone}` : ""}
-          </p>
+              <span className="relative flex" aria-label="Tracking now" style={{ flex: "none", width: 6, height: 6 }}>
+                <span className="wk-live absolute inset-0 rounded-full" />
+                <span className="rounded-full" style={{ width: 6, height: 6, backgroundColor: "var(--wk-accent)" }} />
+              </span>
+            ) : null}
+          </div>
           <SegmentedControl
             label="Date range"
             value={range}
@@ -1171,17 +1366,9 @@ function Dashboard() {
                   </ul>
                 </div>
 
-                {/* A single-day range would draw a one-bar bar chart; the hero
-                    figure already is that number. */}
-                {data.days.length > 1 ? (
+                {dailyDays.length > 0 ? (
                   <div className="wk-hero-chart min-w-0">
-                    <div className="mb-3 flex items-baseline justify-between gap-2">
-                      <span className="text-muted-foreground text-xs opacity-80">Daily activity</span>
-                      {activeDays > 0 ? (
-                        <Caption>{formatDuration(data.workingMs / activeDays)} per active day</Caption>
-                      ) : null}
-                    </div>
-                    <DailyChart days={data.days} height={172} />
+                    <DailyChart days={dailyDays} height={172} focusLast={range === "today"} />
                   </div>
                 ) : null}
               </div>
@@ -1264,7 +1451,13 @@ function Dashboard() {
                   emptyLabel="No agent turns attributed yet."
                 />
               </Panel>
-              <Panel index={9} title="Projects" note="Union of active thread time per project" icon="folder">
+              <Panel index={9} title="Models" note="Summed turn duration per model" icon="cpu">
+                <ModelList models={data.models} />
+              </Panel>
+            </div>
+
+            <div className="wk-grid wk-duo">
+              <Panel index={10} title="Projects" note="Union of active thread time per project" icon="folder">
                 <MeterList
                   total={projectTotal}
                   rows={data.projects.slice(0, 5).map((row, index) => ({
@@ -1275,43 +1468,6 @@ function Dashboard() {
                   }))}
                   emptyLabel="No project activity yet."
                 />
-              </Panel>
-            </div>
-
-            <div className="wk-grid wk-duo">
-              <Panel index={10} title="Models" note="Summed turn duration per model" icon="cpu">
-                {data.models.length === 0 ? (
-                  <Empty>No model attribution yet.</Empty>
-                ) : (
-                  <ul className="divide-border flex flex-col divide-y">
-                    {[...data.models]
-                      .sort((a, b) =>
-                        Number(isUnknown(a.model)) - Number(isUnknown(b.model)) || b.agentRuntimeMs - a.agentRuntimeMs,
-                      )
-                      .slice(0, 5)
-                      .map((row) => (
-                        <li key={`${row.providerId}-${row.model}`} className="flex items-center justify-between gap-3 py-2">
-                          <div className="flex min-w-0 items-center gap-2">
-                            <ProviderLogo id={modelLogoId(row.model) ?? providerLogoId(row.providerId)} size="sm" />
-                            <span className="text-foreground truncate text-sm font-medium"
-                              data-wk-tooltip={shortModel(row.model)} tabIndex={0}>{shortModel(row.model)}</span>
-                            <span className="text-muted-foreground text-xs opacity-70" style={{ flex: "none" }}>
-                              {providerLabel(row.providerId)}
-                            </span>
-                          </div>
-                          <div className="flex items-baseline gap-2" style={{ flex: "none" }}>
-                            <span className="text-foreground text-sm font-medium tabular-nums">
-                              {formatDuration(row.agentRuntimeMs)}
-                            </span>
-                            <span className="text-muted-foreground text-right text-xs tabular-nums opacity-60"
-                              style={{ whiteSpace: "nowrap" }}>
-                              {formatCount(row.turnCount)} turns
-                            </span>
-                          </div>
-                        </li>
-                      ))}
-                  </ul>
-                )}
               </Panel>
 
               <Panel index={11} title="Rhythm" note="Turn pacing across the range" icon="gauge">
@@ -1331,34 +1487,9 @@ function Dashboard() {
 
             {data.machines.length > 0 ? (
               <Panel index={12} title="Machines" note="Union of active thread time per machine" icon="monitor">
-                <ul className="flex flex-wrap gap-2">
-                  {data.machines.slice(0, 6).map((row) => (
-                    <li
-                      key={row.name}
-                      className="border-border bg-muted flex min-w-0 items-center gap-2 rounded-lg border px-3 py-2"
-                    >
-                      <span
-                        aria-hidden="true"
-                        className="rounded-full"
-                        style={{ flex: "none", width: 6, height: 6, backgroundColor: "var(--wk-machine-dot)" }}
-                      />
-                      <span className="text-foreground truncate text-sm font-medium"
-                        data-wk-tooltip={dimensionLabel(row.name, "machine")} tabIndex={0}>
-                        {dimensionLabel(row.name, "machine")}
-                      </span>
-                      <span className="text-muted-foreground text-xs tabular-nums opacity-70" style={{ flex: "none" }}>
-                        {formatDuration(row.workingMs)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+                <MachineList machines={data.machines} />
               </Panel>
             ) : null}
-
-            <p className="text-muted-foreground text-center text-xs opacity-60">
-              {formatCount(data.quality.sampledTurnCount)} of {formatCount(data.turnCount)} turns carry model attribution
-              {topModel ? ` · most used ${shortModel(topModel.model)}` : ""}
-            </p>
           </div>
         ) : null}
       </div>
