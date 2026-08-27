@@ -27,7 +27,7 @@ export function SegmentedControl<T extends string>({
     <div
       role="radiogroup"
       aria-label={label}
-      className={cn("bg-muted inline-flex shrink-0 items-center gap-0.5 rounded-lg p-1", className)}
+      className={cn("bg-muted inline-flex shrink-0 items-center gap-1 rounded-lg p-1", className)}
     >
       {options.map((option) => {
         const selected = option.value === value;

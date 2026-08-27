@@ -49,6 +49,47 @@
   margin-inline: auto;
 }
 
+/* The responsive grids live here rather than as `md:` utilities. The utility
+ * form compiles to an escaped selector (`.md\:grid-cols-4`), and these are the
+ * rules that decide whether the dashboard has a layout at all — they are the
+ * last thing that should depend on the browser parsing an escape. */
+[data-wk-root] .wk-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+[data-wk-root] .wk-tiles {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+[data-wk-root] .wk-duo {
+  align-items: start;
+}
+
+[data-wk-root] .wk-hero-grid {
+  gap: 20px;
+}
+
+@media (min-width: 768px) {
+  [data-wk-root] .wk-tiles {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  [data-wk-root] .wk-duo {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  [data-wk-root] .wk-hero-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  /* the daily chart takes two of the hero's three columns */
+  [data-wk-root] .wk-hero-chart {
+    grid-column: span 2;
+  }
+}
+
 /* The one branded surface: a soft accent wash behind the headline number, so
  * the panel that matters does not look like every other card. */
 [data-wk-root] .wk-hero {

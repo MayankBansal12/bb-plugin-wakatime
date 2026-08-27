@@ -6,9 +6,24 @@ import type { rpcContract } from "./server";
 import { EvilBarChart } from "@/components/evilcharts/charts/recharts-bar-chart";
 import type { ChartConfig } from "@/components/evilcharts/ui/recharts-chart";
 import { ProviderLogo, modelLogoId } from "@/components/provider-logo";
+import { Card } from "@/components/ui/card";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { cn } from "@/lib/utils";
 import "./styles.css";
+
+/*
+ * Styling rules for this file, learned from an older webview that dropped every
+ * Tailwind class whose selector carries a backslash escape:
+ *
+ *   - No arbitrary-value classes (`text-[44px]`, `size-[15px]`, `w-1/3`) and no
+ *     fractional spacing (`gap-1.5`) — those compile to escaped selectors.
+ *     The standard scale never escapes.
+ *   - Anything whose exact pixel value carries meaning (icon boxes, chart
+ *     heights, heatmap cells) is an inline style or an SVG attribute, so it
+ *     cannot depend on the stylesheet resolving at all.
+ *   - Surfaces come from the shadcn Card primitive rather than a hand-rolled
+ *     class string.
+ */
 
 type RangeKey = "today" | "7d" | "30d" | "all";
 
@@ -110,7 +125,7 @@ function splitDuration(ms: number): Array<{ value: string; unit: string }> {
 
 /** Chart labels must not wrap, and recharts breaks on spaces. */
 function formatTight(ms: number): string {
-  return formatDuration(ms).replace(" ", " ");
+  return formatDuration(ms).replace(" ", " ");
 }
 
 function formatCount(value: number): string {
@@ -212,10 +227,25 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
   turns: <><path d="M4 9h11a4 4 0 0 1 0 8h-3" /><path d="m8 13-3.5 4L8 21" /><path d="m16 3 3.5 4L16 11" /></>,
 };
 
-function Icon({ name, className }: { name: IconName; className?: string }) {
+/**
+ * Sized by SVG attributes, not CSS. An icon that loses its class is an icon at
+ * the replaced-element default size, which is how a 16px glyph becomes 300px.
+ */
+function Icon({ name, size = 16, className }: { name: IconName; size?: number; className?: string }) {
   return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"
-      strokeLinecap="round" strokeLinejoin="round" className={cn("size-4 shrink-0", className)}>
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      style={{ flex: "none" }}
+    >
       {ICON_PATHS[name]}
     </svg>
   );
@@ -234,12 +264,6 @@ function providerLogoId(providerId: string): string | null {
   if (key === "pi") return "pi";
   return modelLogoId(key);
 }
-
-function AgentMark({ providerId, size = "sm" }: { providerId: string; size?: "sm" | "md" }) {
-  return <ProviderLogo id={providerLogoId(providerId)} size={size} />;
-}
-
-/* ------------------------------------------------------------------ motion */
 
 /**
  * Panels enter in reading order. The cascade is capped so the last card is
@@ -299,35 +323,34 @@ function GrowBar({ index = 0, className, style }: {
 
 /* -------------------------------------------------------------- primitives */
 
-function Card({ title, note, icon, action, children, className, index = 0 }: {
+/** The shadcn Card with this dashboard's header row on top of it. */
+function Panel({ title, note, icon, action, children, className, index = 0 }: {
   title?: string; note?: string; icon?: IconName; action?: ReactNode;
   children: ReactNode; className?: string; index?: number;
 }) {
   return (
-    <section
-      style={riseDelay(index)}
-      className={cn("wk-rise bg-card border-border flex min-w-0 flex-col rounded-xl border p-4", className)}
-    >
+    <Card style={riseDelay(index)} className={cn("wk-rise flex min-w-0 flex-col p-4", className)}>
       {title ? (
-        <div className="mb-3.5 flex items-start justify-between gap-3">
-          <h2 className="text-foreground flex min-w-0 items-center gap-2 text-[13px] leading-4 font-medium"
-            data-wk-tooltip={note} tabIndex={note ? 0 : undefined}>
-            {icon ? <Icon name={icon} className="text-muted-foreground size-[15px]" /> : null}
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <h2
+            className="text-foreground flex min-w-0 items-center gap-2 text-sm font-medium"
+            data-wk-tooltip={note}
+            tabIndex={note ? 0 : undefined}
+          >
+            {icon ? <Icon name={icon} className="text-muted-foreground" /> : null}
             <span className="truncate">{title}</span>
           </h2>
-          {action ? <div className="shrink-0">{action}</div> : null}
+          {action ? <div style={{ flex: "none" }}>{action}</div> : null}
         </div>
       ) : null}
       {children}
-    </section>
+    </Card>
   );
 }
 
-/** A caption in the card header — the average, the peak, the count. */
+/** A caption in a card header — the average, the peak, the count. */
 function Caption({ children }: { children: ReactNode }) {
-  return (
-    <span className="text-muted-foreground text-[11px] leading-4 tabular-nums opacity-70">{children}</span>
-  );
+  return <span className="text-muted-foreground text-xs tabular-nums opacity-70">{children}</span>;
 }
 
 /**
@@ -338,18 +361,18 @@ function Caption({ children }: { children: ReactNode }) {
 function Delta({ current, previous, blurb }: { current: number; previous: number | null; blurb: string }) {
   if (previous === null || previous <= 0 || current <= 0) return null;
   const percent = ((current - previous) / previous) * 100;
-  if (Math.abs(percent) < 1) {
-    return <Caption>level with {blurb}</Caption>;
-  }
+  if (Math.abs(percent) < 1) return <Caption>level with {blurb}</Caption>;
   const up = percent > 0;
   return (
     <span
-      className="text-muted-foreground bg-muted flex shrink-0 items-center gap-1 rounded-full px-2 py-1 text-[11px] leading-none font-medium tabular-nums"
+      className="text-muted-foreground bg-muted flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium tabular-nums"
+      style={{ flex: "none" }}
       data-wk-tooltip={`${formatDuration(previous)} ${blurb}`}
       tabIndex={0}
     >
-      <svg aria-hidden="true" viewBox="0 0 12 12" className="size-3 shrink-0" fill="none"
-        stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <svg aria-hidden="true" viewBox="0 0 12 12" width={12} height={12} fill="none"
+        stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+        style={{ flex: "none" }}>
         {up ? <path d="M6 9.5V2.5M6 2.5 3 5.5M6 2.5l3 3" /> : <path d="M6 2.5v7M6 9.5l-3-3M6 9.5l3-3" />}
       </svg>
       {Math.abs(percent) >= 999 ? "999+" : Math.abs(percent).toFixed(0)}% vs {blurb}
@@ -359,7 +382,7 @@ function Delta({ current, previous, blurb }: { current: number; previous: number
 
 /**
  * Averages a long series down to at most `points` buckets. A year of daily
- * values drawn across 300px is noise; the same year in 56 buckets is a shape.
+ * values drawn across 56px is noise; the same year in 20 buckets is a shape.
  */
 function condense(values: number[], points: number): number[] {
   if (values.length <= points) return values;
@@ -370,20 +393,15 @@ function condense(values: number[], points: number): number[] {
   });
 }
 
-/**
- * A trend line for the hero and the stat tiles. Drawn in a stretched viewBox so
- * it fills any width; the stroke opts out of that stretch so it stays even.
- */
-function Sparkline({ values, className, strokeWidth = 2, opacity = 1, maxPoints = 56 }: {
-  values: number[]; className?: string; strokeWidth?: number; opacity?: number; maxPoints?: number;
-}) {
+/** The trend line on a stat tile. */
+function Sparkline({ values, maxPoints = 20 }: { values: number[]; maxPoints?: number }) {
   const path = useMemo(() => {
     const series = condense(values, maxPoints);
     if (series.length < 2) return null;
     const max = Math.max(...series, 1);
     const step = 100 / (series.length - 1);
     const points = series.map((value, index) => {
-      // 2 units of headroom top and bottom so the peak is not clipped by the stroke
+      // 2 units of headroom so the peak is not clipped by the stroke
       const y = 30 - (value / max) * 26 - 2;
       return `${(index * step).toFixed(2)},${y.toFixed(2)}`;
     });
@@ -396,8 +414,7 @@ function Sparkline({ values, className, strokeWidth = 2, opacity = 1, maxPoints 
       aria-hidden="true"
       viewBox="0 0 100 30"
       preserveAspectRatio="none"
-      className={cn("h-full w-full overflow-visible", className)}
-      style={{ opacity }}
+      style={{ flex: "none", width: 44, height: 18, opacity: 0.7 }}
     >
       <path d={path.area} fill="var(--wk-accent)" fillOpacity={0.1} />
       <path
@@ -406,7 +423,7 @@ function Sparkline({ values, className, strokeWidth = 2, opacity = 1, maxPoints 
         d={path.line}
         fill="none"
         stroke="var(--wk-accent)"
-        strokeWidth={strokeWidth}
+        strokeWidth={1.5}
         strokeLinecap="round"
         strokeLinejoin="round"
         vectorEffect="non-scaling-stroke"
@@ -416,82 +433,82 @@ function Sparkline({ values, className, strokeWidth = 2, opacity = 1, maxPoints 
   );
 }
 
-/** label · value · delta · trend — the stat tile contract. */
+/** label · value · detail · trend — the stat tile contract. */
 function StatTile({ label, value, unit, detail, icon, trend, index = 0 }: {
   label: string; value: string; unit?: string; detail?: ReactNode;
   icon: IconName; trend?: ReactNode; index?: number;
 }) {
   return (
-    <div
-      style={riseDelay(index)}
-      className="wk-rise bg-card border-border relative flex min-w-0 flex-col justify-between overflow-hidden rounded-xl border p-3.5"
-    >
-      <p className="text-muted-foreground flex items-center gap-1.5 truncate text-[11px] leading-[14px] opacity-80">
-        <Icon name={icon} className="size-3.5" /> {label}
+    <Card style={riseDelay(index)} className="wk-rise flex min-w-0 flex-col justify-between p-4">
+      <p className="text-muted-foreground flex items-center gap-2 truncate text-xs opacity-80">
+        <Icon name={icon} size={14} /> {label}
       </p>
       {/* proportional figures: tabular-nums makes a big standalone number look loose */}
-      <p className="text-foreground mt-2.5 flex min-w-0 items-baseline gap-1 text-[23px] leading-none font-semibold tracking-tight">
+      <p className="text-foreground mt-3 flex min-w-0 items-baseline gap-1 text-2xl font-semibold tracking-tight">
         <span className="truncate">{value}</span>
-        {unit ? <span className="text-muted-foreground text-[13px] font-normal">{unit}</span> : null}
+        {unit ? <span className="text-muted-foreground text-sm font-normal">{unit}</span> : null}
       </p>
-      <div className="mt-2.5 flex h-[18px] items-end justify-between gap-2">
-        <span className="text-muted-foreground min-w-0 truncate text-[11px] leading-none opacity-70">{detail}</span>
-        {trend ? <div className="h-[18px] w-14 shrink-0">{trend}</div> : null}
+      <div className="mt-3 flex items-end justify-between gap-2" style={{ minHeight: 18 }}>
+        <span className="text-muted-foreground min-w-0 truncate text-xs opacity-70">{detail}</span>
+        {trend}
       </div>
-    </div>
+    </Card>
   );
 }
 
-function Empty({ children, className }: { children: ReactNode; className?: string }) {
+function Empty({ children, style }: { children: ReactNode; style?: CSSProperties }) {
   return (
-    <div className={cn("text-muted-foreground flex flex-1 items-center justify-center py-8 text-center text-xs", className)}>
+    <div className="text-muted-foreground flex flex-1 items-center justify-center py-8 text-center text-xs" style={style}>
       {children}
     </div>
   );
 }
 
 /**
- * A ranked list where each row carries its own meter. Replaces a bar chart
- * because the labels here are project and agent names — a category axis
- * truncates them, a full-width row does not.
+ * A ranked list where each row carries its own meter. Not a bar chart, because
+ * the labels here are project and agent names: a category axis truncates them,
+ * a full-width row does not.
  */
 function MeterList({ rows, emptyLabel, total }: {
-  rows: Array<{ key: string; name: string; value: number; detail?: string; mark?: ReactNode; rank: number }>;
+  rows: Array<{ key: string; name: string; value: number; mark?: ReactNode; rank: number }>;
   emptyLabel: string;
   total: number;
 }) {
   if (rows.length === 0) return <Empty>{emptyLabel}</Empty>;
   const max = Math.max(...rows.map((row) => row.value), 1);
   return (
-    <ul className="flex flex-col gap-3.5">
+    <ul className="flex flex-col gap-4">
       {rows.map((row, index) => (
         <li key={row.key} className="min-w-0">
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2">
               {row.mark ?? (
-                <span className="text-muted-foreground w-3 shrink-0 text-center text-[11px] leading-none tabular-nums opacity-50">
+                <span
+                  className="text-muted-foreground text-center text-xs tabular-nums opacity-50"
+                  style={{ flex: "none", width: 12 }}
+                >
                   {row.rank}
                 </span>
               )}
-              <span className="text-foreground truncate text-[13px] leading-4 font-medium"
+              <span className="text-foreground truncate text-sm font-medium"
                 data-wk-tooltip={row.name} tabIndex={0}>{row.name}</span>
             </div>
-            <div className="flex shrink-0 items-baseline gap-2">
-              <span className="text-foreground text-[13px] leading-4 font-medium tabular-nums">
+            <div className="flex items-baseline gap-2" style={{ flex: "none" }}>
+              <span className="text-foreground text-sm font-medium tabular-nums">
                 {formatDuration(row.value)}
               </span>
               {total > 0 ? (
-                <span className="text-muted-foreground w-8 text-right text-[11px] leading-4 tabular-nums opacity-60">
+                <span className="text-muted-foreground text-right text-xs tabular-nums opacity-60" style={{ width: 32 }}>
                   {Math.round((row.value / total) * 100)}%
                 </span>
               ) : null}
             </div>
           </div>
-          <div className="wk-meter-track mt-1.5 h-1.5 w-full overflow-hidden rounded-full">
+          <div className="wk-meter-track mt-2 w-full overflow-hidden rounded-full" style={{ height: 6 }}>
             <GrowBar
               index={index}
-              className="wk-meter-fill h-full rounded-full"
-              style={{ width: `${Math.max(2, (row.value / max) * 100)}%` }}
+              className="wk-meter-fill rounded-full"
+              style={{ height: "100%", width: `${Math.max(2, (row.value / max) * 100)}%` }}
             />
           </div>
         </li>
@@ -585,18 +602,13 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
   };
 
   return (
-    <section
-      style={riseDelay(index)}
-      className="wk-rise bg-card border-border flex min-w-0 flex-col rounded-xl border p-4"
-      data-wk-heat
-    >
-      <div className="mb-3.5 flex items-start justify-between gap-3">
-        <h2 className="text-foreground flex items-center gap-2 text-[13px] leading-4 font-medium"
-          data-wk-tooltip={`Daily working time · ${timezone}`} tabIndex={0}>
-          <Icon name="calendar" className="text-muted-foreground size-[15px]" /> Activity graph
-          <Caption>{activeDays} active days this year</Caption>
-        </h2>
-        <span className="text-muted-foreground flex shrink-0 items-center gap-1 text-[11px] leading-4 opacity-70">
+    <Panel
+      index={index}
+      title="Activity graph"
+      note={`Daily working time · ${timezone}`}
+      icon="calendar"
+      action={
+        <span className="text-muted-foreground flex items-center gap-1 text-xs opacity-70">
           less
           {[0, 1, 2, 3, 4].map((level) => (
             <span
@@ -606,19 +618,20 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
           ))}
           more
         </span>
-      </div>
-
+      }
+    >
+      <p className="text-muted-foreground mb-3 text-xs opacity-70">{activeDays} active days this year</p>
       <div className="flex">
         {/* Weekday gutter lives outside the scroller: inside it, scrolling to
             the most recent week slid these labels out of view. */}
-        <div className="shrink-0" style={{ width: WEEKDAY_COL, paddingRight: LABEL_GAP }}>
+        <div style={{ flex: "none", width: WEEKDAY_COL, paddingRight: LABEL_GAP }}>
           <div style={{ height: 14, marginBottom: CELL_GAP }} aria-hidden="true" />
           <div className="grid" style={{ gridTemplateRows: `repeat(7, ${CELL}px)`, rowGap: CELL_GAP }}>
             {["", "Mon", "", "Wed", "", "Fri", ""].map((label, cellIndex) => (
               <span
                 key={cellIndex}
-                className="text-muted-foreground text-right text-[10px] opacity-70"
-                style={{ lineHeight: `${CELL}px` }}
+                className="text-muted-foreground text-right opacity-70"
+                style={{ fontSize: 10, lineHeight: `${CELL}px` }}
               >
                 {label}
               </span>
@@ -628,7 +641,7 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
 
         <div
           ref={scrollRef}
-          className="min-w-0 flex-1 overflow-x-auto pb-0.5"
+          className="min-w-0 flex-1 overflow-x-auto"
           aria-label="Daily working time for the trailing year"
         >
           <div style={{ width: cellsWidth }}>
@@ -636,8 +649,8 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
             <div className="relative" style={{ height: 14, marginBottom: CELL_GAP }}>
               {months.map((month) => (
                 <span key={`${month.label}-${month.index}`}
-                  className="text-muted-foreground absolute top-0 text-[10px] leading-[14px] opacity-70"
-                  style={{ left: month.index * PITCH }}>
+                  className="text-muted-foreground absolute top-0 opacity-70"
+                  style={{ left: month.index * PITCH, fontSize: 10, lineHeight: "14px" }}>
                   {month.label}
                 </span>
               ))}
@@ -664,7 +677,7 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
                       onMouseEnter={(event) => showCellTooltip(event.currentTarget, event.currentTarget.getAttribute("aria-label") ?? "")}
                       onMouseMove={(event) => showCellTooltip(event.currentTarget, event.currentTarget.getAttribute("aria-label") ?? "", event.clientX, event.clientY - 10)}
                       onMouseLeave={() => setHoveredCell(null)}
-                      className="wk-heat-cell transition-opacity duration-100 ease-out hover:opacity-70"
+                      className="wk-heat-cell"
                       style={{
                         width: CELL,
                         height: CELL,
@@ -687,12 +700,12 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
           {hoveredCell.text}
         </div>
       ) : null}
-    </section>
+    </Panel>
   );
 }
 
 /** Daily working time. Bars, not an area — one day is still a readable chart. */
-function DailyChart({ days }: { days: Day[] }) {
+function DailyChart({ days, height }: { days: Day[]; height: number }) {
   const data = useMemo(() => {
     const bucketSize = Math.max(1, Math.ceil(days.length / 31));
     const buckets = bucketSize === 1 ? days.map((day) => ({ from: day.date, to: day.date, day })) : Array.from(
@@ -722,11 +735,11 @@ function DailyChart({ days }: { days: Day[] }) {
   );
 
   if (days.every((day) => day.workingMs === 0)) {
-    return <Empty className="h-44">Nothing tracked in this range yet.</Empty>;
+    return <Empty style={{ height }}>Nothing tracked in this range yet.</Empty>;
   }
 
   return (
-    <div className="h-44 w-full">
+    <div style={{ height, width: "100%" }}>
       <EvilBarChart
         data={data}
         config={barConfig}
@@ -778,35 +791,35 @@ function HourProfile({ hours }: { hours: number[] }) {
   const total = hours.reduce((sum, value) => sum + value, 0);
   const peak = hours.indexOf(max);
 
-  if (total <= 0) return <Empty className="h-[128px]">No hourly pattern yet.</Empty>;
+  if (total <= 0) return <Empty style={{ height: PLOT_HEIGHT + 32 }}>No hourly pattern yet.</Empty>;
 
   return (
     <div>
-      <div className="flex items-end gap-[2px]" style={{ height: PLOT_HEIGHT }}>
-        {hours.map((value, hour) => {
-          const share = value / max;
-          return (
+      <div className="flex items-end" style={{ height: PLOT_HEIGHT, gap: 2 }}>
+        {hours.map((value, hour) => (
+          <div
+            key={hour}
+            tabIndex={0}
+            className="wk-hour-col flex h-full min-w-0 flex-1 flex-col justify-end"
+            style={{ cursor: "default" }}
+            data-wk-tooltip={`${formatHour(hour)} – ${formatHour((hour + 1) % 24)} · ${formatDuration(value)}`}
+          >
             <div
-              key={hour}
-              tabIndex={0}
-              className="wk-hour-col flex h-full min-w-0 flex-1 cursor-default flex-col justify-end rounded-sm focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none"
-              data-wk-tooltip={`${formatHour(hour)} – ${formatHour((hour + 1) % 24)} · ${formatDuration(value)}`}
-            >
-              <div
-                className="wk-hour-bar wk-grow-y w-full rounded-[3px] rounded-b-none transition-colors duration-150 ease-out"
-                style={{
-                  height: value > 0 ? `${Math.max(3, share * PLOT_HEIGHT)}px` : 2,
-                  backgroundColor: value > 0
-                    ? (hour === peak ? "var(--wk-accent-ink)" : "var(--wk-accent)")
-                    : "var(--wk-track)",
-                  animationDelay: `${100 + hour * 12}ms`,
-                }}
-              />
-            </div>
-          );
-        })}
+              className="wk-hour-bar wk-grow-y w-full"
+              style={{
+                height: value > 0 ? Math.max(3, (value / max) * PLOT_HEIGHT) : 2,
+                borderRadius: "3px 3px 0 0",
+                backgroundColor: value > 0
+                  ? (hour === peak ? "var(--wk-accent-ink)" : "var(--wk-accent)")
+                  : "var(--wk-track)",
+                transition: "background-color 150ms ease-out",
+                animationDelay: `${100 + hour * 12}ms`,
+              }}
+            />
+          </div>
+        ))}
       </div>
-      <div className="text-muted-foreground mt-2 flex justify-between text-[10px] leading-none opacity-70">
+      <div className="text-muted-foreground mt-2 flex justify-between opacity-70" style={{ fontSize: 10 }}>
         {[0, 6, 12, 18].map((hour) => <span key={hour}>{formatHour(hour)}</span>)}
         <span>{formatHour(23)}</span>
       </div>
@@ -839,32 +852,36 @@ function SwarmBar({ distribution }: { distribution: Array<{ concurrentTurns: num
   return (
     <div>
       {/* the 2px gaps are the card surface showing through — no strokes on the marks */}
-      <div className="bg-card flex h-2.5 w-full gap-[2px] overflow-hidden rounded-md">
+      <div className="bg-card flex w-full overflow-hidden" style={{ height: 10, gap: 2, borderRadius: 6 }}>
         {shown.map((bucket, index) => (
           <GrowBar
             key={bucket.label}
             index={index}
-            className="h-full first:rounded-l-md last:rounded-r-md"
             style={{
+              height: "100%",
               width: `${(bucket.durationMs / total) * 100}%`,
               backgroundColor: `var(--wk-l${bucket.level})`,
+              borderTopLeftRadius: index === 0 ? 6 : 0,
+              borderBottomLeftRadius: index === 0 ? 6 : 0,
+              borderTopRightRadius: index === shown.length - 1 ? 6 : 0,
+              borderBottomRightRadius: index === shown.length - 1 ? 6 : 0,
             }}
           />
         ))}
       </div>
-      <dl className="mt-3.5 flex flex-col gap-2">
+      <dl className="mt-4 flex flex-col gap-2">
         {shown.map((bucket) => (
           <div key={bucket.label} className="flex items-center justify-between gap-3">
-            <dt className="text-muted-foreground flex min-w-0 items-center gap-2 text-[12px] leading-4">
-              <span aria-hidden="true" className="size-2.5 shrink-0 rounded-[3px]"
-                style={{ backgroundColor: `var(--wk-l${bucket.level})` }} />
+            <dt className="text-muted-foreground flex min-w-0 items-center gap-2 text-xs">
+              <span aria-hidden="true"
+                style={{ flex: "none", width: 10, height: 10, borderRadius: 3, backgroundColor: `var(--wk-l${bucket.level})` }} />
               <span className="truncate">{bucket.label}</span>
             </dt>
-            <dd className="flex shrink-0 items-baseline gap-2">
-              <span className="text-foreground text-[12px] leading-4 font-medium tabular-nums">
+            <dd className="flex items-baseline gap-2" style={{ flex: "none" }}>
+              <span className="text-foreground text-xs font-medium tabular-nums">
                 {formatDuration(bucket.durationMs)}
               </span>
-              <span className="text-muted-foreground w-8 text-right text-[11px] leading-4 tabular-nums opacity-60">
+              <span className="text-muted-foreground text-right text-xs tabular-nums opacity-60" style={{ width: 32 }}>
                 {Math.round((bucket.durationMs / total) * 100)}%
               </span>
             </dd>
@@ -877,13 +894,13 @@ function SwarmBar({ distribution }: { distribution: Array<{ concurrentTurns: num
 
 function Rows({ items }: { items: Array<{ label: string; value: string; hint?: string }> }) {
   return (
-    <dl className="grid flex-1 grid-cols-2 gap-x-4 gap-y-3.5 self-start">
+    <dl className="grid grid-cols-2 gap-x-4 gap-y-4">
       {items.map((item) => (
         <div key={item.label} className="min-w-0">
-          <dt className="text-muted-foreground truncate text-[11px] leading-none opacity-70" data-wk-tooltip={item.label}>{item.label}</dt>
-          <dd className="text-foreground mt-2 truncate text-[13px] leading-none font-medium tabular-nums">
+          <dt className="text-muted-foreground truncate text-xs opacity-70" data-wk-tooltip={item.label}>{item.label}</dt>
+          <dd className="text-foreground mt-2 truncate text-sm font-medium tabular-nums">
             {item.value}
-            {item.hint ? <span className="text-muted-foreground ml-1 font-normal text-[11px] opacity-70">{item.hint}</span> : null}
+            {item.hint ? <span className="text-muted-foreground ml-1 text-xs font-normal opacity-70">{item.hint}</span> : null}
           </dd>
         </div>
       ))}
@@ -893,14 +910,15 @@ function Rows({ items }: { items: Array<{ label: string; value: string; hint?: s
 
 function LoadingState() {
   return (
-    <div className="space-y-3" aria-live="polite" aria-busy="true">
+    <div className="flex flex-col gap-3" aria-live="polite" aria-busy="true">
       <span className="sr-only">Loading bb activity</span>
-      <div className="bg-muted h-[124px] animate-pulse rounded-xl" />
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        {Array.from({ length: 4 }, (_, index) => <div className="bg-muted h-[104px] animate-pulse rounded-xl" key={index} />)}
+      <div className="bg-muted animate-pulse rounded-lg" style={{ height: 216 }} />
+      <div className="wk-grid wk-tiles">
+        {Array.from({ length: 4 }, (_, index) => (
+          <div className="bg-muted animate-pulse rounded-lg" style={{ height: 104 }} key={index} />
+        ))}
       </div>
-      <div className="bg-muted h-40 animate-pulse rounded-xl" />
-      <div className="bg-muted h-56 animate-pulse rounded-xl" />
+      <div className="bg-muted animate-pulse rounded-lg" style={{ height: 160 }} />
     </div>
   );
 }
@@ -985,7 +1003,6 @@ function Dashboard() {
         name,
         providerId: entry.providerId,
         value: entry.runtimeMs,
-        detail: entry.unattributed ? `${entry.turns} older turns` : `${entry.turns} turns`,
         unattributed: entry.unattributed,
       }))
       .sort((a, b) => Number(a.unattributed) - Number(b.unattributed) || b.value - a.value);
@@ -1010,30 +1027,33 @@ function Dashboard() {
 
   return (
     <main className="h-full overflow-y-auto" data-wk-root>
-      <div className="wk-dashboard-shell w-full space-y-3 p-4 md:p-5">
-        <header className="mb-1 flex items-center justify-between gap-4">
-          <div className="flex min-w-0 items-center gap-2.5">
+      <div className="wk-dashboard-shell flex w-full flex-col gap-3 p-4">
+        <header className="flex items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
             <span
               aria-hidden="true"
-              className="flex size-8 shrink-0 items-center justify-center rounded-[10px] border"
+              className="flex items-center justify-center rounded-lg border"
               style={{
+                flex: "none",
+                width: 32,
+                height: 32,
                 borderColor: "var(--wk-accent-edge)",
                 backgroundColor: "var(--wk-accent-wash)",
                 color: "var(--wk-accent)",
               }}
             >
-              <Icon name="stopwatch" className="size-[18px]" />
+              <Icon name="stopwatch" size={18} />
             </span>
             <div className="min-w-0">
-              <h1 className="text-foreground truncate text-[15px] leading-5 font-semibold tracking-tight">
+              <h1 className="text-foreground truncate font-semibold tracking-tight" style={{ fontSize: 15, lineHeight: "20px" }}>
                 Activity
               </h1>
-              <p className="text-muted-foreground flex items-center gap-1.5 truncate text-[11px] leading-4 opacity-75">
+              <p className="text-muted-foreground flex items-center gap-2 truncate text-xs opacity-75">
                 {live ? (
                   <>
-                    <span className="relative flex size-1.5 shrink-0">
+                    <span className="relative flex" style={{ flex: "none", width: 6, height: 6 }}>
                       <span className="wk-live absolute inset-0 rounded-full" />
-                      <span className="size-1.5 rounded-full" style={{ backgroundColor: "var(--wk-accent)" }} />
+                      <span className="rounded-full" style={{ width: 6, height: 6, backgroundColor: "var(--wk-accent)" }} />
                     </span>
                     Tracking now
                   </>
@@ -1055,7 +1075,7 @@ function Dashboard() {
         {loading && !data ? <LoadingState /> : null}
 
         {error && !data ? (
-          <section className="border-border bg-card flex items-center justify-between gap-4 rounded-xl border p-4" role="alert">
+          <Card className="flex items-center justify-between gap-4 p-4" role="alert">
             <div className="min-w-0">
               <p className="text-foreground text-sm font-medium">Could not load activity</p>
               <p className="text-muted-foreground mt-1 truncate text-xs">{error}</p>
@@ -1063,72 +1083,80 @@ function Dashboard() {
             <button
               type="button"
               onClick={() => void load(range, true)}
-              className="border-border hover:bg-muted shrink-0 rounded-lg border px-3 py-1.5 text-xs transition-[color,background-color,border-color,transform] duration-150 ease-out active:[transform:scale(.97)]"
+              className="border-border hover:bg-muted rounded-lg border px-3 py-2 text-xs transition-colors duration-150 ease-out active:scale-95"
+              style={{ flex: "none" }}
             >
               Retry
             </button>
-          </section>
+          </Card>
         ) : null}
 
         {data ? (
           <div
-            className="space-y-3 transition-opacity duration-200 ease-out"
+            className="flex flex-col gap-3"
             aria-busy={refreshing}
-            style={{ opacity: refreshing ? 0.55 : 1 }}
+            style={{ opacity: refreshing ? 0.55 : 1, transition: "opacity 200ms ease-out" }}
           >
             {error ? (
               <div className="border-border bg-muted text-muted-foreground flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs" role="status">
                 <span className="truncate">Showing the last good data — refresh failed.</span>
-                <button type="button" onClick={() => void load(range)} className="text-foreground shrink-0 underline underline-offset-2">
+                <button type="button" onClick={() => void load(range)} className="text-foreground underline underline-offset-2" style={{ flex: "none" }}>
                   Retry
                 </button>
               </div>
             ) : null}
 
-            <section
-              style={riseDelay(0)}
-              className="wk-rise wk-hero relative min-w-0 overflow-hidden rounded-xl border p-4 md:p-5"
-            >
-              <div className="flex items-start justify-between gap-4">
+            {/* Headline figure and the daily series share one panel: the number
+                is the sum of the bars beside it, so splitting them across two
+                cards left the reader to join them up. */}
+            <Card style={riseDelay(0)} className="wk-rise wk-hero min-w-0 p-4">
+              <div className="wk-grid wk-hero-grid">
                 <div className="min-w-0">
-                  <p className="text-muted-foreground text-[11px] leading-[14px] opacity-80">
-                    bb worked {rangeBlurb}
-                  </p>
+                  <p className="text-muted-foreground text-xs opacity-80">bb worked {rangeBlurb}</p>
                   {/* the one hero figure on the page: proportional figures, not tabular */}
-                  <p className="text-foreground mt-3 flex items-baseline gap-1.5 text-[44px] leading-none font-semibold tracking-[-0.02em]">
+                  <p className="text-foreground mt-3 flex items-baseline gap-2 text-5xl font-semibold tracking-tight">
                     {heroParts.map((part) => (
                       <span key={part.unit}>
                         {part.value}
-                        <span className="text-muted-foreground ml-0.5 text-[20px] font-normal">{part.unit}</span>
+                        <span className="text-muted-foreground text-xl font-normal">{part.unit}</span>
                       </span>
                     ))}
                   </p>
-                  <div className="mt-3.5 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+                  <div className="mt-4 flex flex-wrap items-center gap-2">
                     <Delta current={data.workingMs} previous={data.previous?.workingMs ?? null} blurb={priorBlurb} />
-                    <span className="text-muted-foreground text-[11px] leading-none opacity-80">
-                      <span className="text-foreground font-medium">{formatCount(data.turnCount)}</span> turns ·{" "}
-                      <span className="text-foreground font-medium">{data.projects.length}</span>{" "}
-                      project{data.projects.length === 1 ? "" : "s"} ·{" "}
-                      <span className="text-foreground font-medium">{activeDays}</span> active day{activeDays === 1 ? "" : "s"}
-                    </span>
                   </div>
+                  <p className="text-muted-foreground mt-3 text-xs opacity-80">
+                    <span className="text-foreground font-medium">{formatCount(data.turnCount)}</span> turns ·{" "}
+                    <span className="text-foreground font-medium">{data.projects.length}</span>{" "}
+                    project{data.projects.length === 1 ? "" : "s"} ·{" "}
+                    <span className="text-foreground font-medium">{activeDays}</span> active day{activeDays === 1 ? "" : "s"}
+                  </p>
                 </div>
-                {data.days.length > 2 ? (
-                  <div className="hidden h-[76px] w-[42%] max-w-[300px] shrink-0 self-center sm:block">
-                    <Sparkline values={data.days.map((day) => day.workingMs)} />
+
+                {/* A single-day range would draw a one-bar bar chart; the hero
+                    figure already is that number. */}
+                {data.days.length > 1 ? (
+                  <div className="wk-hero-chart min-w-0">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground text-xs opacity-70">Daily activity</span>
+                      {activeDays > 0 ? (
+                        <Caption>{formatDuration(data.workingMs / activeDays)} per active day</Caption>
+                      ) : null}
+                    </div>
+                    <DailyChart days={data.days} height={168} />
                   </div>
                 ) : null}
               </div>
-            </section>
+            </Card>
 
-            <section className="grid grid-cols-2 gap-3 md:grid-cols-4" aria-label="Highlights">
+            <section className="wk-grid wk-tiles" aria-label="Highlights">
               <StatTile
                 index={1}
                 label="Agent time"
                 icon="clock"
                 value={formatDuration(data.agentRuntimeMs)}
                 detail={data.agentRuntimeMs > data.workingMs ? "beats the clock" : "summed turn time"}
-                trend={<Sparkline values={data.days.map((day) => day.agentRuntimeMs)} strokeWidth={1.5} opacity={0.65} maxPoints={20} />}
+                trend={<Sparkline values={data.days.map((day) => day.agentRuntimeMs)} />}
               />
               <StatTile
                 index={2}
@@ -1136,7 +1164,7 @@ function Dashboard() {
                 icon="turns"
                 value={formatCount(data.turnCount)}
                 detail={`${data.pace.turnsPerActiveHour.toFixed(1)} per hour`}
-                trend={<Sparkline values={data.days.map((day) => day.turnCount)} strokeWidth={1.5} opacity={0.65} maxPoints={20} />}
+                trend={<Sparkline values={data.days.map((day) => day.turnCount)} />}
               />
               <StatTile
                 index={3}
@@ -1145,7 +1173,7 @@ function Dashboard() {
                 value={String(data.concurrency.peakConcurrentTurns)}
                 unit="at once"
                 detail={`${data.concurrency.averageConcurrentTurns.toFixed(1)}× average`}
-                trend={<Sparkline values={data.days.map((day) => day.peakConcurrentTurns)} strokeWidth={1.5} opacity={0.65} maxPoints={20} />}
+                trend={<Sparkline values={data.days.map((day) => day.peakConcurrentTurns)} />}
               />
               <StatTile
                 index={4}
@@ -1161,25 +1189,9 @@ function Dashboard() {
               <ContributionGraph index={5} days={history.days} timezone={data.range.timezone} />
             ) : null}
 
-            {/* A single-day range would draw a one-bar bar chart; the hero
-                figure already is that number, so the card stands down. */}
-            {data.days.length > 1 ? (
-              <Card
+            <div className="wk-grid wk-duo">
+              <Panel
                 index={6}
-                title="Daily activity"
-                note="Union of active thread time, per day"
-                icon="chart"
-                action={activeDays > 0 ? (
-                  <Caption>{formatDuration(data.workingMs / activeDays)} per active day</Caption>
-                ) : null}
-              >
-                <DailyChart days={data.days} />
-              </Card>
-            ) : null}
-
-            <div className="grid items-start gap-3 md:grid-cols-2">
-              <Card
-                index={7}
                 title="When you work"
                 note="Working time by hour of the day, in your server's timezone"
                 icon="moon"
@@ -1188,20 +1200,20 @@ function Dashboard() {
                 ) : null}
               >
                 <HourProfile hours={data.profile.hours} />
-              </Card>
-              <Card
-                index={8}
+              </Panel>
+              <Panel
+                index={7}
                 title="Swarm"
                 note="Share of turn time by how many agents ran at once"
                 icon="layers"
                 action={<Caption>{formatDuration(data.concurrency.swarmTimeMs)} in parallel</Caption>}
               >
                 <SwarmBar distribution={data.concurrency.distribution} />
-              </Card>
+              </Panel>
             </div>
 
-            <div className="grid items-start gap-3 md:grid-cols-2">
-              <Card index={9} title="Agents" note="Summed turn duration per provider" icon="bot">
+            <div className="wk-grid wk-duo">
+              <Panel index={8} title="Agents" note="Summed turn duration per provider" icon="bot">
                 <MeterList
                   total={agentTotal}
                   rows={agents.slice(0, 5).map((agent, index) => ({
@@ -1209,12 +1221,12 @@ function Dashboard() {
                     name: agent.name,
                     value: agent.value,
                     rank: index + 1,
-                    mark: <AgentMark providerId={agent.providerId} />,
+                    mark: <ProviderLogo id={providerLogoId(agent.providerId)} size="sm" />,
                   }))}
                   emptyLabel="No agent turns attributed yet."
                 />
-              </Card>
-              <Card index={10} title="Projects" note="Union of active thread time per project" icon="folder">
+              </Panel>
+              <Panel index={9} title="Projects" note="Union of active thread time per project" icon="folder">
                 <MeterList
                   total={projectTotal}
                   rows={data.projects.slice(0, 5).map((row, index) => ({
@@ -1225,35 +1237,36 @@ function Dashboard() {
                   }))}
                   emptyLabel="No project activity yet."
                 />
-              </Card>
+              </Panel>
             </div>
 
-            <div className="grid items-start gap-3 md:grid-cols-2">
-              <Card index={11} title="Models" note="Summed turn duration per model" icon="cpu">
+            <div className="wk-grid wk-duo">
+              <Panel index={10} title="Models" note="Summed turn duration per model" icon="cpu">
                 {data.models.length === 0 ? (
                   <Empty>No model attribution yet.</Empty>
                 ) : (
-                  <ul className="divide-border -my-1 flex flex-col divide-y">
+                  <ul className="divide-border flex flex-col divide-y">
                     {[...data.models]
                       .sort((a, b) =>
                         Number(isUnknown(a.model)) - Number(isUnknown(b.model)) || b.agentRuntimeMs - a.agentRuntimeMs,
                       )
                       .slice(0, 5)
                       .map((row) => (
-                        <li key={`${row.providerId}-${row.model}`} className="flex items-center justify-between gap-3 py-2.5">
+                        <li key={`${row.providerId}-${row.model}`} className="flex items-center justify-between gap-3 py-2">
                           <div className="flex min-w-0 items-center gap-2">
                             <ProviderLogo id={modelLogoId(row.model) ?? providerLogoId(row.providerId)} size="sm" />
-                            <span className="text-foreground truncate text-[13px] leading-4 font-medium"
+                            <span className="text-foreground truncate text-sm font-medium"
                               data-wk-tooltip={shortModel(row.model)} tabIndex={0}>{shortModel(row.model)}</span>
-                            <span className="text-muted-foreground shrink-0 text-[11px] leading-4 opacity-70">
+                            <span className="text-muted-foreground text-xs opacity-70" style={{ flex: "none" }}>
                               {providerLabel(row.providerId)}
                             </span>
                           </div>
-                          <div className="flex shrink-0 items-baseline gap-2">
-                            <span className="text-foreground text-[13px] leading-4 font-medium tabular-nums">
+                          <div className="flex items-baseline gap-2" style={{ flex: "none" }}>
+                            <span className="text-foreground text-sm font-medium tabular-nums">
                               {formatDuration(row.agentRuntimeMs)}
                             </span>
-                            <span className="text-muted-foreground text-right text-[11px] leading-4 whitespace-nowrap tabular-nums opacity-60">
+                            <span className="text-muted-foreground text-right text-xs tabular-nums opacity-60"
+                              style={{ whiteSpace: "nowrap" }}>
                               {formatCount(row.turnCount)} turns
                             </span>
                           </div>
@@ -1261,9 +1274,9 @@ function Dashboard() {
                       ))}
                   </ul>
                 )}
-              </Card>
+              </Panel>
 
-              <Card index={12} title="Rhythm" note="Turn pacing across the range" icon="gauge">
+              <Panel index={11} title="Rhythm" note="Turn pacing across the range" icon="gauge">
                 <Rows items={[
                   { label: "Typical turn", value: formatDuration(data.pace.medianTurnMs) },
                   { label: "Slowest 10%", value: formatDuration(data.pace.p90TurnMs) },
@@ -1275,36 +1288,36 @@ function Dashboard() {
                     hint: data.streak.busiestDay ? formatDuration(data.streak.busiestDay.workingMs) : undefined },
                   { label: "Best streak", value: `${data.streak.longestDays}`, hint: "days" },
                 ]} />
-              </Card>
+              </Panel>
             </div>
 
             {data.machines.length > 0 ? (
-              <Card index={13} title="Machines" note="Union of active thread time per machine" icon="monitor">
+              <Panel index={12} title="Machines" note="Union of active thread time per machine" icon="monitor">
                 <ul className="flex flex-wrap gap-2">
                   {data.machines.slice(0, 6).map((row) => (
                     <li
                       key={row.name}
-                      className="border-border bg-muted flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5"
+                      className="border-border bg-muted flex min-w-0 items-center gap-2 rounded-lg border px-3 py-2"
                     >
                       <span
                         aria-hidden="true"
-                        className="size-1.5 shrink-0 rounded-full"
-                        style={{ backgroundColor: "var(--wk-machine-dot)" }}
+                        className="rounded-full"
+                        style={{ flex: "none", width: 6, height: 6, backgroundColor: "var(--wk-machine-dot)" }}
                       />
-                      <span className="text-foreground truncate text-[13px] font-medium"
+                      <span className="text-foreground truncate text-sm font-medium"
                         data-wk-tooltip={dimensionLabel(row.name, "machine")} tabIndex={0}>
                         {dimensionLabel(row.name, "machine")}
                       </span>
-                      <span className="text-muted-foreground shrink-0 text-[11px] tabular-nums opacity-70">
+                      <span className="text-muted-foreground text-xs tabular-nums opacity-70" style={{ flex: "none" }}>
                         {formatDuration(row.workingMs)}
                       </span>
                     </li>
                   ))}
                 </ul>
-              </Card>
+              </Panel>
             ) : null}
 
-            <p className="text-muted-foreground pb-1 text-center text-[11px] opacity-60">
+            <p className="text-muted-foreground text-center text-xs opacity-60">
               {formatCount(data.quality.sampledTurnCount)} of {formatCount(data.turnCount)} turns carry model attribution
               {topModel ? ` · most used ${shortModel(topModel.model)}` : ""}
             </p>
