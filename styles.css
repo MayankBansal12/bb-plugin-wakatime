@@ -3,6 +3,15 @@
  * Static sRGB colors avoid color-mix/OKLCH parsing failures in older webviews.
  */
 [data-wk-root] {
+  /* One strong ease-out for the whole panel. The built-in CSS easings are too
+   * weak to read as intentional, and ease-in is never right for UI: it delays
+   * the first frame, which is exactly the one the eye is on. */
+  --wk-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --wk-accent: #2f9e6a;
+  --wk-accent-ink: #1a6b49;
+  --wk-accent-wash: #f2faf6;
+  --wk-accent-edge: #d8ede3;
+  --wk-track: #edf0ef;
   --wk-machine-dot: #2f9e6a;
   --wk-tooltip-bg: #1f2221;
   --wk-tooltip-fg: #f7f8f7;
@@ -11,6 +20,20 @@
   --wk-l2: #48ab7e;
   --wk-l3: #2b8c62;
   --wk-l4: #1a6b49;
+}
+
+.dark [data-wk-root] {
+  --wk-accent: #2eae74;
+  --wk-accent-ink: #45c98b;
+  --wk-accent-wash: #17231d;
+  --wk-accent-edge: #24382e;
+  --wk-track: #2a2c2b;
+  --wk-machine-dot: #2eae74;
+  --wk-l0: #2b2d2c;
+  --wk-l1: #22593c;
+  --wk-l2: #2b7d55;
+  --wk-l3: #359f6d;
+  --wk-l4: #45c98b;
 }
 
 [data-wk-root],
@@ -22,8 +45,83 @@
  * measure fine inside this because each one owns a definite height. */
 [data-wk-root] .wk-dashboard-shell {
   width: 100%;
-  max-width: 56rem;
+  max-width: 58rem;
   margin-inline: auto;
+}
+
+/* The responsive grids live here rather than as `md:` utilities. The utility
+ * form compiles to an escaped selector (`.md\:grid-cols-4`), and these are the
+ * rules that decide whether the dashboard has a layout at all — they are the
+ * last thing that should depend on the browser parsing an escape. */
+[data-wk-root] .wk-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+[data-wk-root] .wk-tiles {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+[data-wk-root] .wk-duo {
+  align-items: start;
+}
+
+[data-wk-root] .wk-hero-grid {
+  gap: 20px;
+}
+
+@media (min-width: 768px) {
+  [data-wk-root] .wk-tiles {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  [data-wk-root] .wk-duo {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  [data-wk-root] .wk-hero-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  /* the daily chart takes two of the hero's three columns */
+  [data-wk-root] .wk-hero-chart {
+    grid-column: span 2;
+  }
+}
+
+/* The one branded surface: a soft accent wash behind the headline number, so
+ * the panel that matters does not look like every other card. */
+[data-wk-root] .wk-hero {
+  border-color: var(--wk-accent-edge);
+  background-color: var(--wk-accent-wash);
+  background-image: linear-gradient(160deg, var(--wk-accent-wash) 0%, var(--card) 62%);
+}
+
+/* Meter track/fill for the ranked lists. The track is a lighter step of the
+ * fill's own ramp so the unfilled part still reads as part of the scale. */
+[data-wk-root] .wk-meter-track {
+  background-color: var(--wk-track);
+}
+
+[data-wk-root] .wk-meter-fill {
+  background-color: var(--wk-accent);
+}
+
+/* "Recording now" pulse. Two rings so it reads at a glance without motion
+ * being the only signal — the label beside it says the same thing. */
+[data-wk-root] .wk-live::after {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background-color: var(--wk-accent);
+  content: "";
+  animation: wk-pulse 2s var(--wk-ease-out) infinite;
+}
+
+@keyframes wk-pulse {
+  0% { opacity: 0.6; transform: scale(1); }
+  70%, 100% { opacity: 0; transform: scale(2.6); }
 }
 
 /* HTML labels get a real, keyboard-accessible tooltip. This intentionally
@@ -54,7 +152,7 @@
   opacity: 0;
   transform: translate(-50%, 2px) scale(0.98);
   transform-origin: 50% 100%;
-  transition: opacity 140ms cubic-bezier(0.23, 1, 0.32, 1), transform 140ms cubic-bezier(0.23, 1, 0.32, 1);
+  transition: opacity 140ms var(--wk-ease-out), transform 140ms var(--wk-ease-out);
 }
 
 [data-wk-tooltip]:not([data-wk-tooltip=""]):hover::after,
@@ -81,21 +179,102 @@
   pointer-events: none;
 }
 
+/* Every entrance below is predetermined — it plays once, on mount, and nothing
+ * can interrupt it. That belongs in CSS, which runs off the main thread and
+ * stays smooth while the panel is still fetching and painting; the equivalent
+ * JS-driven animation drops frames under exactly that load. Sequencing is an
+ * inline `animation-delay` on each element. */
+
+@keyframes wk-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes wk-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes wk-grow-x {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+@keyframes wk-grow-y {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
+
+@keyframes wk-draw {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes wk-cell-in {
+  from { opacity: 0; transform: scale(0.6); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+[data-wk-root] .wk-rise {
+  animation: wk-rise 260ms var(--wk-ease-out) both;
+}
+
+/* A meter's length is the datum, so it counts up from its own baseline rather
+ * than fading in at full width. */
+[data-wk-root] .wk-grow-x {
+  transform-origin: left center;
+  animation: wk-grow-x 420ms var(--wk-ease-out) both;
+}
+
+[data-wk-root] .wk-grow-y {
+  transform-origin: bottom;
+  animation: wk-grow-y 380ms var(--wk-ease-out) both;
+}
+
+/* pathLength="1" on the path makes the dash units fractions of its length. */
+[data-wk-root] .wk-draw {
+  stroke-dasharray: 1;
+  animation: wk-draw 520ms var(--wk-ease-out) both;
+}
+
 .wk-heat-cell {
   cursor: default;
+  animation: wk-cell-in 280ms var(--wk-ease-out) both;
 }
 
-.dark [data-wk-root] {
-  --wk-machine-dot: #2eae74;
-  --wk-l0: #2b2d2c;
-  --wk-l1: #22593c;
-  --wk-l2: #2b7d55;
-  --wk-l3: #359f6d;
-  --wk-l4: #45c98b;
+/* The hour columns are their own hit target: the visible bar can be 3px tall,
+ * so the hoverable column spans the full plot height above it. Gated on a real
+ * pointer — a touch tap fires :hover and would leave the bar stuck highlighted. */
+@media (hover: hover) and (pointer: fine) {
+  [data-wk-root] .wk-hour-col:hover .wk-hour-bar {
+    background-color: var(--wk-accent-ink);
+  }
 }
 
+[data-wk-root] .wk-hour-col:focus-visible .wk-hour-bar {
+  background-color: var(--wk-accent-ink);
+}
+
+/* Reduced motion means fewer and gentler, not none: the opacity fades that
+ * explain where content came from stay, everything that moves or scales goes. */
 @media (prefers-reduced-motion: reduce) {
   [data-wk-root] [data-wk-tooltip]::after {
     transition-duration: 0ms;
+  }
+
+  [data-wk-root] .wk-live::after {
+    animation: none;
+    opacity: 0;
+  }
+
+  [data-wk-root] .wk-rise {
+    animation: wk-fade 200ms ease both;
+  }
+
+  [data-wk-root] .wk-grow-x,
+  [data-wk-root] .wk-grow-y,
+  [data-wk-root] .wk-draw,
+  [data-wk-root] .wk-heat-cell {
+    animation: none;
   }
 }

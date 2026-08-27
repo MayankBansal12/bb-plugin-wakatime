@@ -5,7 +5,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "build": "bb plugin build && node scripts/add-legacy-css-fallback.mjs"
+    "build": "node scripts/check-fragile-classes.mjs && bb plugin build && node scripts/add-legacy-css-fallback.mjs",
+    "check:css": "node scripts/check-fragile-classes.mjs"
   },
   "engines": {
     "bb": ">=0.39",

@@ -35,6 +35,11 @@ const summaryOutputSchema = z
       agentCoverageMs: z.number(), activeMs: z.number(), computeMs: z.number(),
       coverageMs: z.number(), turnCount: z.number(), peakConcurrentTurns: z.number(),
     }).strict()),
+    profile: z.object({ hours: z.array(z.number()), weekdays: z.array(z.number()) }).strict(),
+    previous: z
+      .object({ workingMs: z.number(), agentRuntimeMs: z.number(), turnCount: z.number() })
+      .strict()
+      .nullable(),
     projects: z.array(breakdownSchema), machines: z.array(breakdownSchema),
     models: z.array(z.object({
       providerId: z.string(), model: z.string(), agentRuntimeMs: z.number(),
@@ -399,18 +404,14 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.archived", ({ thread }) => void markInactive(thread.id, Date.now(), "archived"));
   bb.events.on("thread.deleted", ({ thread }) => void markInactive(thread.id, Date.now(), "deleted"));
 
-  function computeSummary(range: RangeKey) {
-    const to = Date.now();
-    const earliest = db.prepare(`SELECT MIN(at) AS earliest FROM (
-      SELECT MIN(started_at) AS at FROM sessions UNION ALL SELECT MIN(started_at) AS at FROM turns
-    )`).get() as { earliest: number | null };
-    const from = rangeStart(range, to, earliest.earliest ?? undefined);
+  /** Every interval overlapping a window, aggregated. `to` also closes open rows. */
+  function analyzeWindow(from: number, to: number, openAt: number) {
     const sessions = db.prepare(`SELECT s.id, s.project_name, s.machine_name, s.started_at,
       COALESCE(s.ended_at, ?) AS ended_at,
       COALESCE(sm.closure_reason, CASE WHEN s.ended_at IS NULL THEN 'open' ELSE 'legacy-unknown' END) AS closure_reason
       FROM sessions s LEFT JOIN session_metadata sm ON sm.session_id = s.id
       WHERE s.started_at < ? AND COALESCE(s.ended_at, ?) > ?`
-    ).all(to, to, to, from) as {
+    ).all(openAt, to, openAt, from) as {
       id: number; project_name: string | null; machine_name: string | null;
       started_at: number; ended_at: number; closure_reason: string;
     }[];
@@ -421,11 +422,11 @@ export default async function plugin(bb: BbPluginApi) {
       FROM turns t LEFT JOIN sessions s ON s.id = t.session_id
       LEFT JOIN turn_metadata tm ON tm.turn_row_id = t.id
       WHERE t.started_at < ? AND COALESCE(t.ended_at, ?) > ?`
-    ).all(to, to, to, from) as {
+    ).all(openAt, to, openAt, from) as {
       provider_id: string; model: string; started_at: number; ended_at: number;
       project_name: string | null; attribution_quality: string; closure_reason: string;
     }[];
-    const analytics = aggregateAnalytics(
+    return aggregateAnalytics(
       sessions.map((session): SessionInterval => ({
         id: session.id, projectName: session.project_name, machineName: session.machine_name,
         start: session.started_at, end: session.ended_at, closureReason: session.closure_reason,
@@ -436,6 +437,18 @@ export default async function plugin(bb: BbPluginApi) {
         attributionQuality: turn.attribution_quality, closureReason: turn.closure_reason,
       })), from, to,
     );
+  }
+
+  function computeSummary(range: RangeKey) {
+    const to = Date.now();
+    const earliest = db.prepare(`SELECT MIN(at) AS earliest FROM (
+      SELECT MIN(started_at) AS at FROM sessions UNION ALL SELECT MIN(started_at) AS at FROM turns
+    )`).get() as { earliest: number | null };
+    const from = rangeStart(range, to, earliest.earliest ?? undefined);
+    const analytics = analyzeWindow(from, to, to);
+    // The comparison window is the same length immediately before this one.
+    // "All time" starts at the first row, so nothing precedes it to compare.
+    const before = range === "all" ? null : analyzeWindow(from - (to - from), from, to);
     return {
       range: { key: range, from, to, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "server local time" },
       generatedAt: to,
@@ -445,6 +458,12 @@ export default async function plugin(bb: BbPluginApi) {
       days: analytics.days.map((day) => ({
         ...day, activeMs: day.workingMs, computeMs: day.agentRuntimeMs, coverageMs: day.agentCoverageMs,
       })),
+      profile: analytics.profile,
+      previous: before && {
+        workingMs: before.workingMs,
+        agentRuntimeMs: before.agentRuntimeMs,
+        turnCount: before.turnCount,
+      },
       projects: analytics.projects.map((row) => ({ ...row, activeMs: row.workingMs })),
       machines: analytics.machines.map((row) => ({ ...row, activeMs: row.workingMs })),
       models: analytics.models.map((row) => ({

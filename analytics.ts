@@ -91,6 +91,42 @@ export function unionIntervals(
   return result;
 }
 
+export interface ActivityProfile {
+  /** Working ms per local hour of day, index 0..23. */
+  hours: number[];
+  /** Working ms per local weekday, index 0 = Sunday .. 6 = Saturday. */
+  weekdays: number[];
+}
+
+/**
+ * Spreads unioned working time over local hour-of-day and weekday buckets.
+ * Intervals are walked one local hour at a time so a session crossing midnight
+ * lands its minutes in the buckets it actually occupied. The `hourEnd > cursor`
+ * guard keeps a DST repeat hour from stalling the walk.
+ */
+export function activityProfile(
+  intervals: readonly Interval[],
+  from: number,
+  to: number,
+): ActivityProfile {
+  const hours = Array.from({ length: 24 }, () => 0);
+  const weekdays = Array.from({ length: 7 }, () => 0);
+  for (const interval of unionIntervals(intervals, from, to)) {
+    let cursor = interval.start;
+    while (cursor < interval.end) {
+      const at = new Date(cursor);
+      const hourEnd = new Date(
+        at.getFullYear(), at.getMonth(), at.getDate(), at.getHours() + 1,
+      ).getTime();
+      const end = Math.min(interval.end, hourEnd > cursor ? hourEnd : cursor + 3_600_000);
+      hours[at.getHours()]! += end - cursor;
+      weekdays[at.getDay()]! += end - cursor;
+      cursor = end;
+    }
+  }
+  return { hours, weekdays };
+}
+
 export function unionMs(
   intervals: readonly Interval[],
   from: number,
@@ -400,6 +436,7 @@ export function aggregateAnalytics(
 
   return {
     workingMs,
+    profile: activityProfile(sessionIntervals, from, to),
     coveredWorkingMs,
     coveragePercent: workingMs > 0 ? (coveredWorkingMs / workingMs) * 100 : 0,
     idleRunwayMs,

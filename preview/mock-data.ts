@@ -66,7 +66,29 @@ export function makeSummary(range: string) {
     concurrency: {
       averageConcurrentTurns: 1.8, peakConcurrentTurns: 6,
       swarmTimeMs: Math.round(workingMs * 0.31),
-      distribution: [{ concurrentTurns: 2, durationMs: 1000 }],
+      distribution: [
+        { concurrentTurns: 1, durationMs: Math.round(workingMs * 0.52) },
+        { concurrentTurns: 2, durationMs: Math.round(workingMs * 0.24) },
+        { concurrentTurns: 3, durationMs: Math.round(workingMs * 0.13) },
+        { concurrentTurns: 4, durationMs: Math.round(workingMs * 0.07) },
+        { concurrentTurns: 6, durationMs: Math.round(workingMs * 0.04) },
+      ],
+    },
+    // a plausible night-owl curve: quiet mornings, an afternoon ramp, a late peak
+    profile: {
+      hours: Array.from({ length: 24 }, (_, h) => {
+        const shape = [.02,.01,0,0,0,0,.01,.05,.18,.35,.5,.62,.55,.7,.85,.92,.8,.6,.45,.55,.78,1,.9,.4][h];
+        return Math.round(workingMs * shape * 0.13 * (0.85 + seeded(h + 40) * 0.3));
+      }),
+      weekdays: Array.from({ length: 7 }, (_, d) => {
+        const shape = [.35, .9, 1, .95, .85, .7, .3][d];
+        return Math.round(workingMs * shape * 0.2);
+      }),
+    },
+    previous: range === "all" ? null : {
+      workingMs: Math.round(workingMs * 0.79),
+      agentRuntimeMs: Math.round(agentRuntimeMs * 0.84),
+      turnCount: Math.round(turnCount * 0.88),
     },
     pace: {
       coveredWorkingMs: Math.round(workingMs * 0.72), coveragePercent: 72,
