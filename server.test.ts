@@ -13,6 +13,7 @@ describe("plugin integration", () => {
       },
     });
     await plugin(bb);
+    await expect(harness.behavior.callRpc("getActivityStatus", null)).resolves.toEqual({ active: false });
     const summary = await harness.behavior.callRpc("getSummary", { range: "today" });
     expect(summary).toMatchObject({
       workingMs: 0,

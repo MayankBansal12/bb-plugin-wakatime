@@ -72,6 +72,10 @@ const summaryOutputSchema = z
   .strict();
 
 export const rpcContract = defineRpcContract({
+  getActivityStatus: {
+    input: z.null(),
+    output: z.object({ active: z.boolean() }).strict(),
+  },
   getSummary: {
     input: z.object({ range: z.enum(["today", "7d", "30d", "all"]) }).strict(),
     output: summaryOutputSchema,
@@ -276,6 +280,10 @@ export default async function plugin(bb: BbPluginApi) {
     }
   });
 
+  function publishActivityStatus() {
+    bb.realtime.publish("activity-status", { active: openSessions.size > 0 });
+  }
+
   async function markActive(threadId: string, at: number) {
     await withLock(threadId, async () => {
       if (openSessions.has(threadId)) return;
@@ -289,6 +297,7 @@ export default async function plugin(bb: BbPluginApi) {
         return { id: row.id, threadId, startedAt: row.started_at };
       })();
       openSessions.set(threadId, session);
+      publishActivityStatus();
       startPolling(threadId);
       await drainEvents(threadId);
     });
@@ -366,6 +375,7 @@ export default async function plugin(bb: BbPluginApi) {
       catch (error) { bb.log.warn(`final event drain failed for ${threadId}: ${String(error)}`) }
       closeThreadIntervals(threadId, at, reason);
       openSessions.delete(threadId);
+      publishActivityStatus();
       stopPolling(threadId);
     });
   }
@@ -501,7 +511,10 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  bb.rpc.register(rpcContract, { getSummary({ range }) { return computeSummary(range) } });
+  bb.rpc.register(rpcContract, {
+    getActivityStatus() { return { active: openSessions.size > 0 } },
+    getSummary({ range }) { return computeSummary(range) },
+  });
   bb.cli.register({
     name: "wakatime", summary: "Show honest interval-derived bb agent activity",
     commands: [

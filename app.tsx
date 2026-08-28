@@ -1,4 +1,4 @@
-import { definePluginApp, useRpc } from "@get-bb/plugin-sdk/app";
+import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -1172,8 +1172,57 @@ function LoadingState() {
   );
 }
 
+function ActiveThreadIndicator() {
+  const rpc = useRpc<typeof rpcContract>();
+  const rpcRef = useRef(rpc);
+  rpcRef.current = rpc;
+  const [active, setActive] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const status = await rpcRef.current.call("getActivityStatus", null);
+      setActive(status.active);
+    } catch {
+      // Keep the last known state; the next poll or realtime signal retries it.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(() => void refresh(), 30_000);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
+  useRealtime("activity-status", (payload) => {
+    if (payload && typeof payload === "object" && "active" in payload && typeof payload.active === "boolean") {
+      setActive(payload.active);
+    }
+  });
+
+  if (!active) return null;
+  return (
+    <span
+      data-wk-root
+      className="relative flex"
+      aria-label="A bb thread is active"
+      title="A bb thread is active"
+      style={{ flex: "none", width: 6, height: 6 }}
+    >
+      <span className="wk-live absolute inset-0 rounded-full" />
+      <span className="rounded-full" style={{ width: 6, height: 6, backgroundColor: "var(--wk-accent)" }} />
+    </span>
+  );
+}
+
 export default definePluginApp((app) => {
-  app.slots.navPanel({ id: "time", title: "WakaTime", icon: "Clock", path: "time", component: Dashboard });
+  app.slots.navPanel({
+    id: "time",
+    title: "WakaTime",
+    icon: "Clock",
+    path: "time",
+    component: Dashboard,
+    headerContent: ActiveThreadIndicator,
+  });
 });
 
 function Dashboard() {
@@ -1265,7 +1314,6 @@ function Dashboard() {
   const agentTotal = agents.reduce((sum, agent) => sum + agent.value, 0);
   const projectTotal = data?.projects.reduce((sum, project) => sum + project.workingMs, 0) ?? 0;
   const activeDays = data?.days.filter((day) => day.workingMs > 0).length ?? 0;
-  const live = (data?.quality.openSessionCount ?? 0) > 0;
   const heroMeta = data
     ? [
         { value: formatCount(data.turnCount), label: data.turnCount === 1 ? "turn" : "turns" },
@@ -1280,13 +1328,7 @@ function Dashboard() {
   return (
     <main className="h-full overflow-y-auto" data-wk-root>
       <div className="wk-dashboard-shell flex w-full flex-col gap-3 p-4">
-        <header className="flex items-center justify-end gap-2" style={{ minHeight: 30 }}>
-          {live ? (
-            <span className="relative flex" aria-label="Tracking now" style={{ flex: "none", width: 6, height: 6 }}>
-              <span className="wk-live absolute inset-0 rounded-full" />
-              <span className="rounded-full" style={{ width: 6, height: 6, backgroundColor: "var(--wk-accent)" }} />
-            </span>
-          ) : null}
+        <header className="flex items-center justify-end" style={{ minHeight: 30 }}>
           <SegmentedControl
             label="Date range"
             value={range}
