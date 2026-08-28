@@ -3,6 +3,8 @@ import { z } from "zod";
 import {
   aggregateAnalytics,
   crashRecoveryEnd,
+  isValidTimeZone,
+  normalizeTimeZone,
   rangeStart,
   type RangeKey,
   type SessionInterval,
@@ -22,6 +24,11 @@ const HEARTBEAT_GRACE_MS = 90_000;
 const breakdownSchema = z
   .object({ name: z.string(), workingMs: z.number(), activeMs: z.number() })
   .strict();
+// Deliberately not validated as an IANA zone here: a viewer whose browser
+// reports a zone this server's ICU does not know would fail the whole request
+// and blank the dashboard. `computeSummary` falls back instead, and the
+// response echoes the zone actually used so the UI can label itself honestly.
+const timeZoneSchema = z.string().max(100).optional();
 const summaryOutputSchema = z
   .object({
     range: z
@@ -72,8 +79,15 @@ const summaryOutputSchema = z
   .strict();
 
 export const rpcContract = defineRpcContract({
+  getActivityStatus: {
+    input: z.null(),
+    output: z.object({ active: z.boolean() }).strict(),
+  },
   getSummary: {
-    input: z.object({ range: z.enum(["today", "7d", "30d", "all"]) }).strict(),
+    input: z.object({
+      range: z.enum(["today", "7d", "30d", "all"]),
+      timezone: timeZoneSchema,
+    }).strict(),
     output: summaryOutputSchema,
   },
 });
@@ -276,6 +290,10 @@ export default async function plugin(bb: BbPluginApi) {
     }
   });
 
+  function publishActivityStatus() {
+    bb.realtime.publish("activity-status", { active: openSessions.size > 0 });
+  }
+
   async function markActive(threadId: string, at: number) {
     await withLock(threadId, async () => {
       if (openSessions.has(threadId)) return;
@@ -289,6 +307,7 @@ export default async function plugin(bb: BbPluginApi) {
         return { id: row.id, threadId, startedAt: row.started_at };
       })();
       openSessions.set(threadId, session);
+      publishActivityStatus();
       startPolling(threadId);
       await drainEvents(threadId);
     });
@@ -366,6 +385,7 @@ export default async function plugin(bb: BbPluginApi) {
       catch (error) { bb.log.warn(`final event drain failed for ${threadId}: ${String(error)}`) }
       closeThreadIntervals(threadId, at, reason);
       openSessions.delete(threadId);
+      publishActivityStatus();
       stopPolling(threadId);
     });
   }
@@ -405,7 +425,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.deleted", ({ thread }) => void markInactive(thread.id, Date.now(), "deleted"));
 
   /** Every interval overlapping a window, aggregated. `to` also closes open rows. */
-  function analyzeWindow(from: number, to: number, openAt: number) {
+  function analyzeWindow(from: number, to: number, openAt: number, timeZone: string) {
     const sessions = db.prepare(`SELECT s.id, s.project_name, s.machine_name, s.started_at,
       COALESCE(s.ended_at, ?) AS ended_at,
       COALESCE(sm.closure_reason, CASE WHEN s.ended_at IS NULL THEN 'open' ELSE 'legacy-unknown' END) AS closure_reason
@@ -435,22 +455,26 @@ export default async function plugin(bb: BbPluginApi) {
         providerId: turn.provider_id, model: turn.model, projectName: turn.project_name,
         start: turn.started_at, end: turn.ended_at,
         attributionQuality: turn.attribution_quality, closureReason: turn.closure_reason,
-      })), from, to,
+      })), from, to, timeZone,
     );
   }
 
-  function computeSummary(range: RangeKey) {
+  function computeSummary(range: RangeKey, requestedTimeZone?: string) {
     const to = Date.now();
+    if (requestedTimeZone !== undefined && !isValidTimeZone(requestedTimeZone)) {
+      bb.log.warn(`ignoring unrecognized timezone ${JSON.stringify(requestedTimeZone)}`);
+    }
+    const timeZone = normalizeTimeZone(requestedTimeZone);
     const earliest = db.prepare(`SELECT MIN(at) AS earliest FROM (
       SELECT MIN(started_at) AS at FROM sessions UNION ALL SELECT MIN(started_at) AS at FROM turns
     )`).get() as { earliest: number | null };
-    const from = rangeStart(range, to, earliest.earliest ?? undefined);
-    const analytics = analyzeWindow(from, to, to);
+    const from = rangeStart(range, to, earliest.earliest ?? undefined, timeZone);
+    const analytics = analyzeWindow(from, to, to, timeZone);
     // The comparison window is the same length immediately before this one.
     // "All time" starts at the first row, so nothing precedes it to compare.
-    const before = range === "all" ? null : analyzeWindow(from - (to - from), from, to);
+    const before = range === "all" ? null : analyzeWindow(from - (to - from), from, to, timeZone);
     return {
-      range: { key: range, from, to, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "server local time" },
+      range: { key: range, from, to, timezone: timeZone },
       generatedAt: to,
       workingMs: analytics.workingMs, agentRuntimeMs: analytics.agentRuntimeMs,
       agentCoverageMs: analytics.agentCoverageMs, totalActiveMs: analytics.workingMs,
@@ -501,7 +525,10 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  bb.rpc.register(rpcContract, { getSummary({ range }) { return computeSummary(range) } });
+  bb.rpc.register(rpcContract, {
+    getActivityStatus() { return { active: openSessions.size > 0 } },
+    getSummary({ range, timezone }) { return computeSummary(range, timezone) },
+  });
   bb.cli.register({
     name: "wakatime", summary: "Show honest interval-derived bb agent activity",
     commands: [

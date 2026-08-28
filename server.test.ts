@@ -13,8 +13,13 @@ describe("plugin integration", () => {
       },
     });
     await plugin(bb);
-    const summary = await harness.behavior.callRpc("getSummary", { range: "today" });
+    await expect(harness.behavior.callRpc("getActivityStatus", null)).resolves.toEqual({ active: false });
+    const summary = await harness.behavior.callRpc("getSummary", {
+      range: "today",
+      timezone: "Asia/Kolkata",
+    });
     expect(summary).toMatchObject({
+      range: { timezone: "Asia/Kolkata" },
       workingMs: 0,
       agentRuntimeMs: 0,
       agentCoverageMs: 0,
@@ -49,7 +54,10 @@ describe("plugin integration", () => {
       (turn_row_id, attribution_quality, closure_reason)
       VALUES (?, 'sampled-live', 'completed')`
     ).run(Number(turn.lastInsertRowid));
-    const populated = await harness.behavior.callRpc("getSummary", { range: "today" }) as {
+    const populated = await harness.behavior.callRpc("getSummary", {
+      range: "today",
+      timezone: "Asia/Kolkata",
+    }) as {
       models: Array<Record<string, string | number>>;
     };
     expect(populated.models).toEqual([{
@@ -61,5 +69,36 @@ describe("plugin integration", () => {
       sampledTurnCount: 1,
     }]);
     await harness.lifecycle.dispose();
+  });
+
+  it("falls back to the server timezone instead of failing on an unusable one", async () => {
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "wakatime",
+      sdk: { threads: { list: async () => [] } },
+    });
+    await plugin(bb);
+    const system = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+    // A browser may report a zone this server's ICU does not know. That must
+    // degrade to the server's own zone, not blank the whole dashboard.
+    for (const timezone of ["", "Not/AZone", "Mars/Olympus_Mons"]) {
+      const summary = await harness.behavior.callRpc("getSummary", { range: "today", timezone }) as {
+        range: { timezone: string };
+      };
+      expect(summary.range.timezone).toBe(system);
+    }
+
+    // Omitting it entirely is still allowed, as the CLI does.
+    const omitted = await harness.behavior.callRpc("getSummary", { range: "today" }) as {
+      range: { timezone: string };
+    };
+    expect(omitted.range.timezone).toBe(system);
+
+    // A recognised zone is honoured and echoed back verbatim.
+    const kolkata = await harness.behavior.callRpc("getSummary", {
+      range: "today",
+      timezone: "Asia/Kolkata",
+    }) as { range: { timezone: string } };
+    expect(kolkata.range.timezone).toBe("Asia/Kolkata");
   });
 });

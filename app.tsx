@@ -1,9 +1,10 @@
-import { definePluginApp, useRpc } from "@get-bb/plugin-sdk/app";
+import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useReducedMotion } from "motion/react";
 import type { rpcContract } from "./server";
+import { dayKey, dayKeyToUtc, shiftDayKey, weekdayOfDayKey } from "./analytics";
 import { EvilBarChart } from "@/components/evilcharts/charts/recharts-bar-chart";
 import type { ChartConfig } from "@/components/evilcharts/ui/recharts-chart";
 import { ProviderLogo, modelLogoId } from "@/components/provider-logo";
@@ -161,21 +162,28 @@ function formatDate(date: string, withWeekday = false): string {
     : { month: "short", day: "numeric" }).format(value);
 }
 
-function localDayKey(timestamp: number): string {
-  const date = new Date(timestamp);
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day}`;
+/* Day keys arrive from the server already resolved in `range.timezone`, so the
+   dashboard shifts them with the same UTC-based calendar helpers the server
+   uses. Stepping a local `Date` by 86_400_000 ms instead drifts an hour across
+   a DST transition and lands on the wrong calendar day. */
+
+/** Today's date in `timeZone`. Guarded because the zone is echoed by the
+ *  server and this browser's ICU need not recognise every zone the server's does. */
+function dayKeyIn(timestamp: number, timeZone: string): string {
+  try {
+    return dayKey(timestamp, timeZone);
+  } catch {
+    return dayKey(timestamp);
+  }
 }
 
-function recentThreeDays(history: Day[], selected: Day[]): Day[] {
+function recentThreeDays(history: Day[], selected: Day[], timezone: string): Day[] {
   const rows = new Map([...history, ...selected].map((day) => [day.date, day]));
-  const latest = selected[selected.length - 1]?.date ?? history[history.length - 1]?.date ?? localDayKey(Date.now());
-  const anchor = new Date(`${latest}T12:00:00`);
+  const latest = selected[selected.length - 1]?.date
+    ?? history[history.length - 1]?.date
+    ?? dayKeyIn(Date.now(), timezone);
   return [-2, -1, 0].map((offset) => {
-    const date = new Date(anchor);
-    date.setDate(anchor.getDate() + offset);
-    const key = localDayKey(date.getTime());
+    const key = shiftDayKey(latest, offset);
     return rows.get(key) ?? {
       date: key,
       workingMs: 0,
@@ -194,6 +202,10 @@ function recentThreeDays(history: Day[], selected: Day[]): Day[] {
 function formatHour(hour: number): string {
   return new Intl.DateTimeFormat(undefined, { hour: "numeric" })
     .format(new Date(2024, 0, 1, hour));
+}
+
+function viewerTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
 function shortModel(model: string): string {
@@ -725,11 +737,12 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
   const { weeks, months, thresholds } = useMemo(() => {
     const byDate = new Map(days.map((day) => [day.date, day]));
 
-    // End on the current week's Saturday so every column is a whole week.
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const end = today.getTime() + (6 - today.getDay()) * DAY_MS;
-    const start = end - (HEATMAP_WEEKS * 7 - 1) * DAY_MS;
+    // End on the current week's Saturday so every column is a whole week. The
+    // grid walks calendar dates in the same timezone the server keyed `days`
+    // by, so every cell lands in its true weekday row year-round.
+    const today = dayKeyIn(Date.now(), timezone);
+    const end = shiftDayKey(today, 6 - weekdayOfDayKey(today));
+    const start = shiftDayKey(end, -(HEATMAP_WEEKS * 7 - 1));
 
     const cells: Array<Array<{ date: string; workingMs: number; turnCount: number; future: boolean }>> = [];
     const monthLabels: Array<{ index: number; label: string }> = [];
@@ -737,25 +750,25 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
 
     for (let week = 0; week < HEATMAP_WEEKS; week += 1) {
       const column = Array.from({ length: 7 }, (_, weekday) => {
-        const stamp = start + (week * 7 + weekday) * DAY_MS;
-        const date = localDayKey(stamp);
+        const date = shiftDayKey(start, week * 7 + weekday);
         const day = byDate.get(date);
         return {
           date,
           workingMs: day?.workingMs ?? 0,
           turnCount: day?.turnCount ?? 0,
-          future: stamp > today.getTime(),
+          future: date > today,
         };
       });
 
-      const monthOfColumn = new Date(start + week * 7 * DAY_MS).getMonth();
+      const columnStart = dayKeyToUtc(shiftDayKey(start, week * 7));
+      const monthOfColumn = new Date(columnStart).getUTCMonth();
       // Label a month on the first column that belongs to it, but only when the
       // previous label is far enough back that the two cannot collide.
       const previous = monthLabels[monthLabels.length - 1];
       if (monthOfColumn !== lastMonth && (!previous || week - previous.index >= 3) && week <= HEATMAP_WEEKS - 3) {
         monthLabels.push({
           index: week,
-          label: new Intl.DateTimeFormat(undefined, { month: "short" }).format(start + week * 7 * DAY_MS),
+          label: new Intl.DateTimeFormat(undefined, { month: "short", timeZone: "UTC" }).format(columnStart),
         });
       }
       lastMonth = monthOfColumn;
@@ -766,7 +779,7 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
     const at = (fraction: number) =>
       worked.length === 0 ? 0 : worked[Math.min(worked.length - 1, Math.floor(worked.length * fraction))]!;
     return { weeks: cells, months: monthLabels, thresholds: [at(0.25), at(0.5), at(0.75)] };
-  }, [days]);
+  }, [days, timezone]);
 
   const levelOf = (workingMs: number): number => {
     if (workingMs <= 0) return 0;
@@ -1134,17 +1147,17 @@ function LoadingState() {
   return (
     <div className="flex flex-col gap-3" aria-live="polite" aria-busy="true">
       <span className="sr-only">Loading bb activity</span>
-      <Card className="min-w-0 p-4" style={{ height: 216 }}>
-        <div className="wk-grid wk-hero-grid h-full">
+      <Card className="wk-loading-hero min-w-0 p-4">
+        <div className="wk-grid wk-hero-grid">
           <div className="flex flex-col gap-3">
             <span className="wk-skeleton rounded" style={{ width: 84, height: 10 }} />
             <span className="wk-skeleton rounded-md" style={{ width: 150, height: 42 }} />
             <span className="wk-skeleton rounded-full" style={{ width: 104, height: 22 }} />
-            <div className="mt-auto grid grid-cols-3 gap-3">
+            <div className="wk-loading-meta mt-auto grid grid-cols-3 gap-3">
               {[54, 62, 48].map((width) => <span key={width} className="wk-skeleton rounded" style={{ width, height: 24 }} />)}
             </div>
           </div>
-          <div className="wk-hero-chart flex min-w-0 items-end gap-2" aria-hidden="true">
+          <div className="wk-loading-chart wk-hero-chart flex min-w-0 items-end gap-2" aria-hidden="true">
             {barHeights.map((barHeight, index) => (
               <span key={index} className="wk-skeleton min-w-0 flex-1 rounded-t" style={{ height: barHeight }} />
             ))}
@@ -1153,7 +1166,7 @@ function LoadingState() {
       </Card>
       <div className="wk-grid wk-tiles">
         {Array.from({ length: 4 }, (_, index) => (
-          <Card className="flex flex-col gap-3 p-4" style={{ height: 112 }} key={index}>
+          <Card className="wk-loading-tile flex flex-col gap-3 p-4" key={index}>
             <span className="wk-skeleton rounded" style={{ width: 70 + index * 8, height: 10 }} />
             <span className="wk-skeleton rounded-md" style={{ width: 80, height: 26 }} />
             <span className="wk-skeleton mt-auto rounded" style={{ width: "100%", height: 8 }} />
@@ -1172,8 +1185,57 @@ function LoadingState() {
   );
 }
 
+function ActiveThreadIndicator() {
+  const rpc = useRpc<typeof rpcContract>();
+  const rpcRef = useRef(rpc);
+  rpcRef.current = rpc;
+  const [active, setActive] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const status = await rpcRef.current.call("getActivityStatus", null);
+      setActive(status.active);
+    } catch {
+      // Keep the last known state; the next poll or realtime signal retries it.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(() => void refresh(), 30_000);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
+  useRealtime("activity-status", (payload) => {
+    if (payload && typeof payload === "object" && "active" in payload && typeof payload.active === "boolean") {
+      setActive(payload.active);
+    }
+  });
+
+  if (!active) return null;
+  return (
+    <span
+      data-wk-root
+      className="relative flex"
+      aria-label="A bb thread is active"
+      title="A bb thread is active"
+      style={{ flex: "none", width: 6, height: 6 }}
+    >
+      <span className="wk-live absolute inset-0 rounded-full" />
+      <span className="rounded-full" style={{ width: 6, height: 6, backgroundColor: "var(--wk-accent)" }} />
+    </span>
+  );
+}
+
 export default definePluginApp((app) => {
-  app.slots.navPanel({ id: "time", title: "WakaTime", icon: "Clock", path: "time", component: Dashboard });
+  app.slots.navPanel({
+    id: "time",
+    title: "WakaTime",
+    icon: "Clock",
+    path: "time",
+    component: Dashboard,
+    headerContent: ActiveThreadIndicator,
+  });
 });
 
 function Dashboard() {
@@ -1197,10 +1259,11 @@ function Dashboard() {
     // remount anything, so it neither sets `loading` nor `refreshing`.
     if (initial) setLoading(true);
     try {
+      const timezone = viewerTimeZone();
       // The heatmap always shows the trailing year, whatever range is selected.
       const [summary, allTime] = await Promise.all([
-        rpcRef.current.call("getSummary", { range: nextRange }),
-        nextRange === "all" ? null : rpcRef.current.call("getSummary", { range: "all" }),
+        rpcRef.current.call("getSummary", { range: nextRange, timezone }),
+        nextRange === "all" ? null : rpcRef.current.call("getSummary", { range: "all", timezone }),
       ]);
       if (generation !== requestGeneration.current) return;
       setData(summary as Summary);
@@ -1265,7 +1328,6 @@ function Dashboard() {
   const agentTotal = agents.reduce((sum, agent) => sum + agent.value, 0);
   const projectTotal = data?.projects.reduce((sum, project) => sum + project.workingMs, 0) ?? 0;
   const activeDays = data?.days.filter((day) => day.workingMs > 0).length ?? 0;
-  const live = (data?.quality.openSessionCount ?? 0) > 0;
   const heroMeta = data
     ? [
         { value: formatCount(data.turnCount), label: data.turnCount === 1 ? "turn" : "turns" },
@@ -1274,24 +1336,19 @@ function Dashboard() {
       ]
     : [];
   const dailyDays = data
-    ? (range === "today" ? recentThreeDays(history?.days ?? [], data.days) : data.days)
+    ? (range === "today" ? recentThreeDays(history?.days ?? [], data.days, data.range.timezone) : data.days)
     : [];
 
   return (
     <main className="h-full overflow-y-auto" data-wk-root>
       <div className="wk-dashboard-shell flex w-full flex-col gap-3 p-4">
-        <header className="flex items-center justify-end gap-2" style={{ minHeight: 30 }}>
-          {live ? (
-            <span className="relative flex" aria-label="Tracking now" style={{ flex: "none", width: 6, height: 6 }}>
-              <span className="wk-live absolute inset-0 rounded-full" />
-              <span className="rounded-full" style={{ width: 6, height: 6, backgroundColor: "var(--wk-accent)" }} />
-            </span>
-          ) : null}
+        <header className="flex items-center justify-end" style={{ minHeight: 30 }}>
           <SegmentedControl
             label="Date range"
             value={range}
             onChange={changeRange}
             options={RANGES.map((entry) => ({ value: entry.key, label: entry.label }))}
+            className="wk-range-control"
           />
         </header>
 
@@ -1337,7 +1394,7 @@ function Dashboard() {
                 <div className="wk-hero-figure min-w-0">
                   <p className="text-muted-foreground text-xs opacity-80">bb worked {rangeBlurb}</p>
                   {/* the one hero figure on the page: proportional figures, not tabular */}
-                  <p className="text-foreground flex items-baseline gap-2 text-5xl font-semibold tracking-tight">
+                  <p className="wk-hero-value text-foreground flex items-baseline gap-2 text-5xl font-semibold tracking-tight">
                     {heroParts.map((part) => (
                       <span key={part.unit}>
                         {part.value}
@@ -1414,7 +1471,7 @@ function Dashboard() {
               <Panel
                 index={6}
                 title="When you work"
-                note="Working time by hour of the day, in your server's timezone"
+                note={`Working time by hour of day · ${data.range.timezone}`}
                 icon="moon"
                 action={Math.max(...data.profile.hours) > 0 ? (
                   <Caption>peak {formatHour(data.profile.hours.indexOf(Math.max(...data.profile.hours)))}</Caption>

@@ -4,7 +4,14 @@ import {
   concurrencyStats,
   crashRecoveryEnd,
   activityProfile,
+  dayKey,
+  dayKeyToUtc,
   percentile,
+  rangeStart,
+  shiftDayKey,
+  weekdayOfDayKey,
+  isValidTimeZone,
+  normalizeTimeZone,
   unionIntervals,
   unionMs,
   type SessionInterval,
@@ -192,5 +199,166 @@ describe("activity profile", () => {
     expect(profile.hours).toHaveLength(24);
     expect(profile.weekdays).toHaveLength(7);
     expect(profile.hours.every((value) => value === 0)).toBe(true);
+  });
+
+  it("buckets an absolute timestamp in the requested viewer timezone", () => {
+    const start = Date.parse("2026-08-20T09:30:00.000Z");
+    const profile = activityProfile(
+      [{ start, end: start + hour }],
+      start,
+      start + hour,
+      "Asia/Kolkata",
+    );
+
+    expect(profile.hours[15]).toBe(hour);
+    expect(profile.hours[9]).toBe(0);
+  });
+
+  it("handles skipped and repeated daylight-saving hours", () => {
+    const springStart = Date.parse("2026-03-08T06:30:00.000Z");
+    const spring = activityProfile(
+      [{ start: springStart, end: springStart + hour }],
+      springStart,
+      springStart + hour,
+      "America/New_York",
+    );
+    expect(spring.hours[1]).toBe(30 * minute);
+    expect(spring.hours[2]).toBe(0);
+    expect(spring.hours[3]).toBe(30 * minute);
+
+    const fallStart = Date.parse("2026-11-01T05:30:00.000Z");
+    const fall = activityProfile(
+      [{ start: fallStart, end: fallStart + 2 * hour }],
+      fallStart,
+      fallStart + 2 * hour,
+      "America/New_York",
+    );
+    expect(fall.hours[1]).toBe(90 * minute);
+    expect(fall.hours[2]).toBe(30 * minute);
+  });
+});
+
+describe("viewer timezone calendar boundaries", () => {
+  it("starts today at midnight in the requested IANA timezone", () => {
+    const now = Date.parse("2026-08-20T10:00:00.000Z");
+    expect(rangeStart("today", now, undefined, "Asia/Kolkata"))
+      .toBe(Date.parse("2026-08-19T18:30:00.000Z"));
+    expect(dayKey(now, "Asia/Kolkata")).toBe("2026-08-20");
+    expect(dayKey(now, "America/Los_Angeles")).toBe("2026-08-20");
+  });
+
+  it("splits daily totals at the viewer's midnight", () => {
+    const start = Date.parse("2026-08-20T18:00:00.000Z");
+    const end = Date.parse("2026-08-20T20:00:00.000Z");
+    const result = aggregateAnalytics(
+      [session(start, end)],
+      [],
+      start,
+      end,
+      "Asia/Kolkata",
+    );
+
+    expect(result.days.map((day) => [day.date, day.workingMs])).toEqual([
+      ["2026-08-20", 30 * minute],
+      ["2026-08-21", 90 * minute],
+    ]);
+  });
+});
+
+describe("calendar key arithmetic", () => {
+  it("shifts across month, year and leap-day boundaries", () => {
+    expect(shiftDayKey("2026-08-20", 1)).toBe("2026-08-21");
+    expect(shiftDayKey("2026-08-31", 1)).toBe("2026-09-01");
+    expect(shiftDayKey("2026-01-01", -1)).toBe("2025-12-31");
+    expect(shiftDayKey("2024-02-28", 1)).toBe("2024-02-29");
+    expect(shiftDayKey("2026-02-28", 1)).toBe("2026-03-01");
+    expect(shiftDayKey("2026-08-20", 0)).toBe("2026-08-20");
+  });
+
+  it("reads weekdays with Sunday as zero", () => {
+    expect(weekdayOfDayKey("2026-08-23")).toBe(0);
+    expect(weekdayOfDayKey("2026-08-28")).toBe(5);
+  });
+
+  it("walks a trailing year of keys without duplicating or skipping a day", () => {
+    // Regression: the heatmap grid used to step a local Date by 86_400_000 ms,
+    // which drifts an hour at each DST transition. In a DST zone that rendered
+    // one date twice, dropped another entirely, and pushed 18 weeks of cells
+    // into the wrong weekday row.
+    const end = shiftDayKey("2026-08-28", 6 - weekdayOfDayKey("2026-08-28"));
+    const start = shiftDayKey(end, -(53 * 7 - 1));
+    const keys = Array.from({ length: 53 * 7 }, (_, offset) => shiftDayKey(start, offset));
+
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys[0]).toBe(start);
+    expect(keys[keys.length - 1]).toBe(end);
+    for (const [offset, key] of keys.entries()) {
+      expect(weekdayOfDayKey(key)).toBe(offset % 7);
+      expect(dayKeyToUtc(key) - dayKeyToUtc(start)).toBe(offset * 86_400_000);
+    }
+  });
+});
+
+describe("timezone edge cases", () => {
+  const hour = 60 * minute;
+
+  it("starts a day whose local midnight never happens", () => {
+    // Santiago springs forward at 00:00 on 2026-09-06, so that date's first
+    // representable wall time is 01:00.
+    const start = rangeStart("today", Date.parse("2026-09-06T18:00:00.000Z"), undefined, "America/Santiago");
+    expect(new Date(start).toISOString()).toBe("2026-09-06T04:00:00.000Z");
+    expect(dayKey(start, "America/Santiago")).toBe("2026-09-06");
+    expect(dayKey(start - 1, "America/Santiago")).toBe("2026-09-05");
+  });
+
+  it("keeps short and long DST days whole", () => {
+    const day = (date: string, zone: string) =>
+      rangeStart("today", dayKeyToUtc(date) + 12 * 3_600_000, undefined, zone);
+    // 23 hours forward, 25 hours back, in the same zone.
+    expect(day("2026-03-09", "America/New_York") - day("2026-03-08", "America/New_York"))
+      .toBe(23 * 3_600_000);
+    expect(day("2026-11-02", "America/New_York") - day("2026-11-01", "America/New_York"))
+      .toBe(25 * 3_600_000);
+    // A half-hour DST shift, which whole-hour arithmetic would round away.
+    expect(day("2026-10-05", "Australia/Lord_Howe") - day("2026-10-04", "Australia/Lord_Howe"))
+      .toBe(23.5 * 3_600_000);
+  });
+
+  it("charges a DST day the full wall-clock time it covers", () => {
+    // 2026-11-01 in New York is 25 hours long; a session spanning it entirely
+    // must report 25 hours of working time on that date.
+    const start = rangeStart("today", Date.parse("2026-11-01T12:00:00.000Z"), undefined, "America/New_York");
+    const end = start + 25 * hour;
+    const result = aggregateAnalytics([session(start, end)], [], start, end, "America/New_York");
+
+    expect(result.days).toHaveLength(1);
+    expect(result.days[0]!.date).toBe("2026-11-01");
+    expect(result.days[0]!.workingMs).toBe(25 * hour);
+    expect(result.profile.hours.reduce((total, value) => total + value, 0)).toBe(25 * hour);
+    expect(result.profile.weekdays[0]).toBe(25 * hour);
+  });
+
+  it("falls back to the system zone for missing or unusable timezones", () => {
+    const system = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    expect(normalizeTimeZone(undefined)).toBe(system);
+    expect(normalizeTimeZone("Not/AZone")).toBe(system);
+    expect(normalizeTimeZone("")).toBe(system);
+    expect(normalizeTimeZone("Asia/Kolkata")).toBe("Asia/Kolkata");
+    expect(isValidTimeZone("Asia/Kolkata")).toBe(true);
+    expect(isValidTimeZone("UTC")).toBe(true);
+    expect(isValidTimeZone("Not/AZone")).toBe(false);
+    expect(isValidTimeZone("")).toBe(false);
+  });
+
+  it("keeps day boundaries independent of the process timezone", () => {
+    const now = Date.parse("2026-08-20T10:00:00.000Z");
+    for (const zone of ["UTC", "Asia/Kolkata", "America/Los_Angeles", "Pacific/Kiritimati"]) {
+      expect(dayKey(rangeStart("today", now, undefined, zone), zone)).toBe(dayKey(now, zone));
+      expect(rangeStart("7d", now, undefined, zone))
+        .toBeLessThan(rangeStart("today", now, undefined, zone));
+    }
+    // Zones far enough apart to disagree about which date it is.
+    expect(dayKey(now, "Pacific/Kiritimati")).toBe("2026-08-21");
+    expect(dayKey(now, "Pacific/Midway")).toBe("2026-08-19");
   });
 });

@@ -30,32 +30,169 @@ export interface DailyActivity {
 }
 
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 
-function localDayStart(timestamp: number): number {
-  const date = new Date(timestamp);
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+const formatterCache = new Map<string, Intl.DateTimeFormat>();
+const dayStartCache = new Map<string, number>();
+
+interface ZonedParts {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  weekday: number;
 }
 
-function addLocalDays(timestamp: number, days: number): number {
-  const date = new Date(timestamp);
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days).getTime();
+function systemTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
-export function dayKey(timestamp: number): string {
-  const date = new Date(timestamp);
+/** Validate an IANA timezone, falling back only for trusted internal callers. */
+export function normalizeTimeZone(timeZone?: string): string {
+  const fallback = systemTimeZone();
+  if (!timeZone) return fallback;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone });
+    return timeZone;
+  } catch {
+    return fallback;
+  }
+}
+
+export function isValidTimeZone(timeZone: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function formatter(timeZone: string): Intl.DateTimeFormat {
+  const cached = formatterCache.get(timeZone);
+  if (cached) return cached;
+  const value = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    calendar: "gregory",
+    numberingSystem: "latn",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    weekday: "short",
+    hourCycle: "h23",
+  });
+  formatterCache.set(timeZone, value);
+  return value;
+}
+
+function zonedParts(timestamp: number, timeZone: string): ZonedParts {
+  const values: Record<string, string> = {};
+  for (const part of formatter(timeZone).formatToParts(new Date(timestamp))) {
+    if (part.type !== "literal") values[part.type] = part.value;
+  }
+  const weekdays: Record<string, number> = {
+    Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
+  };
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+    second: Number(values.second),
+    weekday: weekdays[values.weekday ?? ""] ?? 0,
+  };
+}
+
+function keyFromParts(parts: Pick<ZonedParts, "year" | "month" | "day">): string {
   const pad = (value: number) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
+}
+
+/** The UTC instant naming a `YYYY-MM-DD` key. Only for calendar arithmetic on
+ *  the key itself — it is not the instant that day starts in any zone. */
+export function dayKeyToUtc(date: string): number {
+  const [year, month, day] = date.split("-").map(Number) as [number, number, number];
+  return Date.UTC(year, month - 1, day);
+}
+
+/** Shift a `YYYY-MM-DD` key by whole calendar days. Done in UTC so it is exact:
+ *  stepping a local `Date` by 86_400_000 ms drifts across a DST transition. */
+export function shiftDayKey(date: string, days: number): string {
+  const shifted = new Date(dayKeyToUtc(date) + days * DAY_MS);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`;
+}
+
+/** Weekday of a `YYYY-MM-DD` key, 0 = Sunday, read in UTC for the same reason. */
+export function weekdayOfDayKey(date: string): number {
+  return new Date(dayKeyToUtc(date)).getUTCDay();
+}
+
+function offsetAt(timestamp: number, timeZone: string): number {
+  const parts = zonedParts(timestamp, timeZone);
+  const representedAsUtc = Date.UTC(
+    parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second,
+  );
+  return representedAsUtc - Math.floor(timestamp / 1000) * 1000;
+}
+
+/** Resolve the first instant belonging to a local calendar date in an IANA zone. */
+function dayStartForKey(date: string, timeZone: string): number {
+  const cacheKey = `${timeZone}\u0000${date}`;
+  const cached = dayStartCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const [year, month, day] = date.split("-").map(Number) as [number, number, number];
+  const wallMidnight = Date.UTC(year, month - 1, day);
+  let result = wallMidnight - offsetAt(wallMidnight, timeZone);
+  result = wallMidnight - offsetAt(result, timeZone);
+
+  const parts = zonedParts(result, timeZone);
+  if (keyFromParts(parts) !== date || parts.hour !== 0 || parts.minute !== 0 || parts.second !== 0) {
+    // Covers midnight offset changes and the rare calendar day whose first
+    // representable wall time is later than 00:00.
+    let low = wallMidnight - 36 * HOUR_MS;
+    let high = wallMidnight + 36 * HOUR_MS;
+    while (high - low > 1) {
+      const middle = Math.floor((low + high) / 2);
+      if (dayKey(middle, timeZone) < date) low = middle;
+      else high = middle;
+    }
+    result = high;
+  }
+
+  dayStartCache.set(cacheKey, result);
+  return result;
+}
+
+function localDayStart(timestamp: number, timeZone: string): number {
+  return dayStartForKey(dayKey(timestamp, timeZone), timeZone);
+}
+
+function addLocalDays(timestamp: number, days: number, timeZone: string): number {
+  return dayStartForKey(shiftDayKey(dayKey(timestamp, timeZone), days), timeZone);
+}
+
+export function dayKey(timestamp: number, timeZone = systemTimeZone()): string {
+  return keyFromParts(zonedParts(timestamp, timeZone));
 }
 
 export function rangeStart(
   range: RangeKey,
   now: number,
   earliestTimestamp?: number,
+  timeZone = systemTimeZone(),
 ): number {
-  const today = localDayStart(now);
+  const today = localDayStart(now, timeZone);
   if (range === "today") return today;
-  if (range === "7d") return addLocalDays(today, -6);
-  if (range === "30d") return addLocalDays(today, -29);
+  if (range === "7d") return addLocalDays(today, -6, timeZone);
+  if (range === "30d") return addLocalDays(today, -29, timeZone);
   return Math.min(today, earliestTimestamp ?? today);
 }
 
@@ -108,19 +245,44 @@ export function activityProfile(
   intervals: readonly Interval[],
   from: number,
   to: number,
+  timeZone = systemTimeZone(),
 ): ActivityProfile {
   const hours = Array.from({ length: 24 }, () => 0);
   const weekdays = Array.from({ length: 7 }, () => 0);
   for (const interval of unionIntervals(intervals, from, to)) {
     let cursor = interval.start;
     while (cursor < interval.end) {
-      const at = new Date(cursor);
-      const hourEnd = new Date(
-        at.getFullYear(), at.getMonth(), at.getDate(), at.getHours() + 1,
-      ).getTime();
-      const end = Math.min(interval.end, hourEnd > cursor ? hourEnd : cursor + 3_600_000);
-      hours[at.getHours()]! += end - cursor;
-      weekdays[at.getDay()]! += end - cursor;
+      const at = zonedParts(cursor, timeZone);
+      const bucket = `${keyFromParts(at)}T${at.hour}`;
+      const milliseconds = ((cursor % 1000) + 1000) % 1000;
+      const untilNominalHour = HOUR_MS - at.minute * 60_000 - at.second * 1000 - milliseconds;
+      let high = Math.min(interval.end, cursor + Math.max(1, untilNominalHour));
+      const sameBucket = (timestamp: number) => {
+        const parts = zonedParts(timestamp, timeZone);
+        return `${keyFromParts(parts)}T${parts.hour}` === bucket;
+      };
+
+      // A repeated DST hour can still be the same bucket at the nominal
+      // boundary. Advance by real hours until the wall-clock bucket changes.
+      while (high < interval.end && sameBucket(high)) {
+        high = Math.min(interval.end, high + HOUR_MS);
+      }
+
+      let end = high;
+      if (!sameBucket(high) && high - cursor > 1 && !sameBucket(high - 1)) {
+        // An offset transition may change the wall clock before the nominal
+        // hour. Find that exact boundary without assuming a fixed UTC offset.
+        let low = cursor;
+        while (high - low > 1) {
+          const middle = Math.floor((low + high) / 2);
+          if (sameBucket(middle)) low = middle;
+          else high = middle;
+        }
+        end = high;
+      }
+
+      hours[at.hour]! += end - cursor;
+      weekdays[at.weekday]! += end - cursor;
       cursor = end;
     }
   }
@@ -257,24 +419,24 @@ export function concurrencyStats(
   };
 }
 
-function splitAcrossDays(interval: Interval): { date: string; interval: Interval }[] {
+function splitAcrossDays(interval: Interval, timeZone: string): { date: string; interval: Interval }[] {
   const segments: { date: string; interval: Interval }[] = [];
   let cursor = interval.start;
   while (cursor < interval.end) {
-    const nextDay = addLocalDays(localDayStart(cursor), 1);
+    const nextDay = addLocalDays(localDayStart(cursor, timeZone), 1, timeZone);
     const end = Math.min(interval.end, nextDay);
-    segments.push({ date: dayKey(cursor), interval: { start: cursor, end } });
+    segments.push({ date: dayKey(cursor, timeZone), interval: { start: cursor, end } });
     cursor = end;
   }
   return segments;
 }
 
-function enumerateDays(from: number, to: number): string[] {
+function enumerateDays(from: number, to: number, timeZone: string): string[] {
   const dates: string[] = [];
-  let cursor = localDayStart(from);
-  while (cursor < to) {
-    dates.push(dayKey(cursor));
-    cursor = addLocalDays(cursor, 1);
+  let date = dayKey(from, timeZone);
+  while (dayStartForKey(date, timeZone) < to) {
+    dates.push(date);
+    date = shiftDayKey(date, 1);
   }
   return dates;
 }
@@ -325,6 +487,7 @@ export function aggregateAnalytics(
   turns: readonly TurnInterval[],
   from: number,
   to: number,
+  timeZone = systemTimeZone(),
 ) {
   const sessionIntervals: readonly Interval[] = sessions;
   const turnIntervals: readonly Interval[] = turns;
@@ -338,7 +501,7 @@ export function aggregateAnalytics(
   for (const session of sessions) {
     const clipped = clipInterval(session, from, to);
     if (!clipped) continue;
-    for (const segment of splitAcrossDays(clipped)) {
+    for (const segment of splitAcrossDays(clipped, timeZone)) {
       const rows = workingDays.get(segment.date) ?? [];
       rows.push(segment.interval);
       workingDays.set(segment.date, rows);
@@ -347,19 +510,18 @@ export function aggregateAnalytics(
   for (const turn of turns) {
     const clipped = clipInterval(turn, from, to);
     if (!clipped) continue;
-    for (const segment of splitAcrossDays(clipped)) {
+    for (const segment of splitAcrossDays(clipped, timeZone)) {
       const rows = turnDays.get(segment.date) ?? [];
       rows.push({ ...turn, ...segment.interval });
       turnDays.set(segment.date, rows);
     }
   }
 
-  const days = enumerateDays(from, to).map((date): DailyActivity => {
+  const days = enumerateDays(from, to, timeZone).map((date): DailyActivity => {
     const dailyWorking = workingDays.get(date) ?? [];
     const dailyTurns = turnDays.get(date) ?? [];
-    const dayFrom = dailyWorking[0]?.start ?? dailyTurns[0]?.start ?? from;
-    const dayStart = localDayStart(dayFrom);
-    const dayEnd = addLocalDays(dayStart, 1);
+    const dayStart = dayStartForKey(date, timeZone);
+    const dayEnd = dayStartForKey(shiftDayKey(date, 1), timeZone);
     const dailyConcurrency = concurrencyStats(dailyTurns, dayStart, dayEnd);
     return {
       date,
@@ -431,12 +593,12 @@ export function aggregateAnalytics(
     (best, day) => (!best || day.workingMs > best.workingMs ? day : best),
     null,
   );
-  const { currentStreakDays, longestStreakDays } = streaks(days, dayKey(to));
+  const { currentStreakDays, longestStreakDays } = streaks(days, dayKey(to, timeZone));
   const clippedTurns = turns.filter((turn) => clipInterval(turn, from, to));
 
   return {
     workingMs,
-    profile: activityProfile(sessionIntervals, from, to),
+    profile: activityProfile(sessionIntervals, from, to, timeZone),
     coveredWorkingMs,
     coveragePercent: workingMs > 0 ? (coveredWorkingMs / workingMs) * 100 : 0,
     idleRunwayMs,
