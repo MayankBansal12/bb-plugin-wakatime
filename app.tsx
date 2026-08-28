@@ -1280,17 +1280,13 @@ function Dashboard() {
   return (
     <main className="h-full overflow-y-auto" data-wk-root>
       <div className="wk-dashboard-shell flex w-full flex-col gap-3 p-4">
-        <header className="flex items-center justify-between gap-3" style={{ minHeight: 30 }}>
-          <div className="flex min-w-0 items-center gap-2">
-            <Icon name="clock" className="text-muted-foreground" />
-            <h1 className="text-foreground truncate text-sm font-semibold">WakaTime</h1>
-            {live ? (
-              <span className="relative flex" aria-label="Tracking now" style={{ flex: "none", width: 6, height: 6 }}>
-                <span className="wk-live absolute inset-0 rounded-full" />
-                <span className="rounded-full" style={{ width: 6, height: 6, backgroundColor: "var(--wk-accent)" }} />
-              </span>
-            ) : null}
-          </div>
+        <header className="flex items-center justify-end gap-2" style={{ minHeight: 30 }}>
+          {live ? (
+            <span className="relative flex" aria-label="Tracking now" style={{ flex: "none", width: 6, height: 6 }}>
+              <span className="wk-live absolute inset-0 rounded-full" />
+              <span className="rounded-full" style={{ width: 6, height: 6, backgroundColor: "var(--wk-accent)" }} />
+            </span>
+          ) : null}
           <SegmentedControl
             label="Date range"
             value={range}
