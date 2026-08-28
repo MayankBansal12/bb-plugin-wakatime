@@ -1134,17 +1134,17 @@ function LoadingState() {
   return (
     <div className="flex flex-col gap-3" aria-live="polite" aria-busy="true">
       <span className="sr-only">Loading bb activity</span>
-      <Card className="min-w-0 p-4" style={{ height: 216 }}>
-        <div className="wk-grid wk-hero-grid h-full">
+      <Card className="wk-loading-hero min-w-0 p-4">
+        <div className="wk-grid wk-hero-grid">
           <div className="flex flex-col gap-3">
             <span className="wk-skeleton rounded" style={{ width: 84, height: 10 }} />
             <span className="wk-skeleton rounded-md" style={{ width: 150, height: 42 }} />
             <span className="wk-skeleton rounded-full" style={{ width: 104, height: 22 }} />
-            <div className="mt-auto grid grid-cols-3 gap-3">
+            <div className="wk-loading-meta mt-auto grid grid-cols-3 gap-3">
               {[54, 62, 48].map((width) => <span key={width} className="wk-skeleton rounded" style={{ width, height: 24 }} />)}
             </div>
           </div>
-          <div className="wk-hero-chart flex min-w-0 items-end gap-2" aria-hidden="true">
+          <div className="wk-loading-chart wk-hero-chart flex min-w-0 items-end gap-2" aria-hidden="true">
             {barHeights.map((barHeight, index) => (
               <span key={index} className="wk-skeleton min-w-0 flex-1 rounded-t" style={{ height: barHeight }} />
             ))}
@@ -1153,7 +1153,7 @@ function LoadingState() {
       </Card>
       <div className="wk-grid wk-tiles">
         {Array.from({ length: 4 }, (_, index) => (
-          <Card className="flex flex-col gap-3 p-4" style={{ height: 112 }} key={index}>
+          <Card className="wk-loading-tile flex flex-col gap-3 p-4" key={index}>
             <span className="wk-skeleton rounded" style={{ width: 70 + index * 8, height: 10 }} />
             <span className="wk-skeleton rounded-md" style={{ width: 80, height: 26 }} />
             <span className="wk-skeleton mt-auto rounded" style={{ width: "100%", height: 8 }} />
@@ -1292,6 +1292,7 @@ function Dashboard() {
             value={range}
             onChange={changeRange}
             options={RANGES.map((entry) => ({ value: entry.key, label: entry.label }))}
+            className="wk-range-control"
           />
         </header>
 
@@ -1337,7 +1338,7 @@ function Dashboard() {
                 <div className="wk-hero-figure min-w-0">
                   <p className="text-muted-foreground text-xs opacity-80">bb worked {rangeBlurb}</p>
                   {/* the one hero figure on the page: proportional figures, not tabular */}
-                  <p className="text-foreground flex items-baseline gap-2 text-5xl font-semibold tracking-tight">
+                  <p className="wk-hero-value text-foreground flex items-baseline gap-2 text-5xl font-semibold tracking-tight">
                     {heroParts.map((part) => (
                       <span key={part.unit}>
                         {part.value}

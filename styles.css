@@ -58,6 +58,8 @@
   width: 100%;
   max-width: 58rem;
   margin-inline: auto;
+  container-name: wk-dashboard;
+  container-type: inline-size;
 }
 
 /* The responsive grids live here rather than as `md:` utilities. The utility
@@ -85,8 +87,18 @@
   gap: 20px;
 }
 
+[data-wk-root] .wk-hero-value {
+  min-width: 0;
+  flex-wrap: wrap;
+  font-size: clamp(2.5rem, 11cqi, 3rem);
+}
+
 [data-wk-root] .wk-segmented {
   background: transparent;
+}
+
+[data-wk-root] .wk-range-control {
+  max-width: 100%;
 }
 
 [data-wk-root] .wk-segmented-option {
@@ -127,7 +139,10 @@
   list-style: none;
 }
 
-@media (min-width: 768px) {
+/* A nav panel can be narrow inside a wide bb window. These breakpoints follow
+ * the panel's content box, not the browser viewport, so opening a split or the
+ * right panel cannot leave desktop columns squeezed into mobile space. */
+@container wk-dashboard (min-width: 48rem) {
   [data-wk-root] .wk-tiles {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
@@ -150,6 +165,29 @@
 
   [data-wk-root] .wk-machine-grid-single {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@container wk-dashboard (max-width: 28rem) {
+  [data-wk-root] .wk-range-control {
+    display: flex;
+    width: 100%;
+  }
+
+  [data-wk-root] .wk-range-control .wk-segmented-option {
+    min-width: 0;
+    flex: 1 1 0;
+    padding-inline: 8px;
+  }
+}
+
+@container wk-dashboard (max-width: 22rem) {
+  [data-wk-root] .wk-tiles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  [data-wk-root] .wk-hero-meta {
+    gap-inline: 8px;
   }
 }
 
@@ -246,8 +284,25 @@
 [data-wk-root] .wk-skeleton {
   position: relative;
   display: block;
+  max-width: 100%;
   overflow: hidden;
   background-color: var(--wk-skeleton-base);
+}
+
+[data-wk-root] .wk-loading-hero {
+  min-height: 216px;
+}
+
+[data-wk-root] .wk-loading-chart {
+  height: 160px;
+}
+
+[data-wk-root] .wk-loading-meta > * {
+  max-width: 100%;
+}
+
+[data-wk-root] .wk-loading-tile {
+  min-height: 112px;
 }
 
 [data-wk-root] .wk-skeleton::after {
