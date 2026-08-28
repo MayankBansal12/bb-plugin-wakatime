@@ -17,8 +17,9 @@ Time tracking for [bb](https://getbb.app) — like WakaTime, but for your AI age
   plus swarm time with two or more turns running.
 - **Rhythm** — median/p90 turn duration, turns per active hour, streaks,
   busiest day, and working time not covered by an observed turn.
-- **Daily shape** — unioned working time bucketed by local hour of day and by
-  weekday, so a session crossing midnight is charged to both sides.
+- **Daily shape** — unioned working time bucketed by the dashboard viewer's
+  local hour and weekday, so a session crossing midnight is charged to both
+  sides in the timezone where the dashboard is being viewed.
 - **Trend** — the same totals for the equal-length window immediately before the
   selected one, which the dashboard shows as a change against it. "All time" has
   no window before it, so it reports no change.
@@ -52,7 +53,13 @@ bb plugin install git:https://github.com/MayankBansal12/bb-plugin-wakatime.git@s
 - Never stored: thread titles, prompts, messages, or file contents. Only
   intervals, stable project/host IDs for new rows, project/machine names,
   provider/model strings, attribution quality, closure reason, and turn counts.
-- Day boundaries use the bb server's local timezone.
+- The dashboard sends the browser's IANA timezone with each query. Stored
+  intervals are absolute timestamps, so agents and the bb server may run in
+  different timezones without shifting the chart. If the server does not
+  recognise the zone it falls back to its own and says so in the response, which
+  the hour and activity-graph panels label. The CLI uses the bb server's
+  timezone because a terminal invocation does not expose the viewer's browser
+  timezone.
 
 ## How it works
 

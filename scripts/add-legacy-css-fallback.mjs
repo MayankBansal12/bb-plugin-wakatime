@@ -102,7 +102,17 @@ const scopes = [];
 root.walkAtRules("scope", (rule) => scopes.push(rule));
 
 if (scopes.length === 0) {
-  throw new Error("bb's generated @scope block was not found; refusing to emit an incomplete fallback");
+  let hasPrefixedRules = false;
+  root.walkRules((rule) => {
+    if (/\[data-bb-plugin=(?:"wakatime"|wakatime)\]/.test(rule.selector)) {
+      hasPrefixedRules = true;
+    }
+  });
+  if (!hasPrefixedRules) {
+    throw new Error("bb's generated plugin scope was not found; refusing to emit an incomplete fallback");
+  }
+  console.log("CSS is already flattened and plugin-prefixed; legacy fallback is not needed.");
+  process.exit(0);
 }
 
 const fallback = postcss.root();

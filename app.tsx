@@ -4,6 +4,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useReducedMotion } from "motion/react";
 import type { rpcContract } from "./server";
+import { dayKey, dayKeyToUtc, shiftDayKey, weekdayOfDayKey } from "./analytics";
 import { EvilBarChart } from "@/components/evilcharts/charts/recharts-bar-chart";
 import type { ChartConfig } from "@/components/evilcharts/ui/recharts-chart";
 import { ProviderLogo, modelLogoId } from "@/components/provider-logo";
@@ -161,21 +162,28 @@ function formatDate(date: string, withWeekday = false): string {
     : { month: "short", day: "numeric" }).format(value);
 }
 
-function localDayKey(timestamp: number): string {
-  const date = new Date(timestamp);
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day}`;
+/* Day keys arrive from the server already resolved in `range.timezone`, so the
+   dashboard shifts them with the same UTC-based calendar helpers the server
+   uses. Stepping a local `Date` by 86_400_000 ms instead drifts an hour across
+   a DST transition and lands on the wrong calendar day. */
+
+/** Today's date in `timeZone`. Guarded because the zone is echoed by the
+ *  server and this browser's ICU need not recognise every zone the server's does. */
+function dayKeyIn(timestamp: number, timeZone: string): string {
+  try {
+    return dayKey(timestamp, timeZone);
+  } catch {
+    return dayKey(timestamp);
+  }
 }
 
-function recentThreeDays(history: Day[], selected: Day[]): Day[] {
+function recentThreeDays(history: Day[], selected: Day[], timezone: string): Day[] {
   const rows = new Map([...history, ...selected].map((day) => [day.date, day]));
-  const latest = selected[selected.length - 1]?.date ?? history[history.length - 1]?.date ?? localDayKey(Date.now());
-  const anchor = new Date(`${latest}T12:00:00`);
+  const latest = selected[selected.length - 1]?.date
+    ?? history[history.length - 1]?.date
+    ?? dayKeyIn(Date.now(), timezone);
   return [-2, -1, 0].map((offset) => {
-    const date = new Date(anchor);
-    date.setDate(anchor.getDate() + offset);
-    const key = localDayKey(date.getTime());
+    const key = shiftDayKey(latest, offset);
     return rows.get(key) ?? {
       date: key,
       workingMs: 0,
@@ -194,6 +202,10 @@ function recentThreeDays(history: Day[], selected: Day[]): Day[] {
 function formatHour(hour: number): string {
   return new Intl.DateTimeFormat(undefined, { hour: "numeric" })
     .format(new Date(2024, 0, 1, hour));
+}
+
+function viewerTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
 function shortModel(model: string): string {
@@ -725,11 +737,12 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
   const { weeks, months, thresholds } = useMemo(() => {
     const byDate = new Map(days.map((day) => [day.date, day]));
 
-    // End on the current week's Saturday so every column is a whole week.
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const end = today.getTime() + (6 - today.getDay()) * DAY_MS;
-    const start = end - (HEATMAP_WEEKS * 7 - 1) * DAY_MS;
+    // End on the current week's Saturday so every column is a whole week. The
+    // grid walks calendar dates in the same timezone the server keyed `days`
+    // by, so every cell lands in its true weekday row year-round.
+    const today = dayKeyIn(Date.now(), timezone);
+    const end = shiftDayKey(today, 6 - weekdayOfDayKey(today));
+    const start = shiftDayKey(end, -(HEATMAP_WEEKS * 7 - 1));
 
     const cells: Array<Array<{ date: string; workingMs: number; turnCount: number; future: boolean }>> = [];
     const monthLabels: Array<{ index: number; label: string }> = [];
@@ -737,25 +750,25 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
 
     for (let week = 0; week < HEATMAP_WEEKS; week += 1) {
       const column = Array.from({ length: 7 }, (_, weekday) => {
-        const stamp = start + (week * 7 + weekday) * DAY_MS;
-        const date = localDayKey(stamp);
+        const date = shiftDayKey(start, week * 7 + weekday);
         const day = byDate.get(date);
         return {
           date,
           workingMs: day?.workingMs ?? 0,
           turnCount: day?.turnCount ?? 0,
-          future: stamp > today.getTime(),
+          future: date > today,
         };
       });
 
-      const monthOfColumn = new Date(start + week * 7 * DAY_MS).getMonth();
+      const columnStart = dayKeyToUtc(shiftDayKey(start, week * 7));
+      const monthOfColumn = new Date(columnStart).getUTCMonth();
       // Label a month on the first column that belongs to it, but only when the
       // previous label is far enough back that the two cannot collide.
       const previous = monthLabels[monthLabels.length - 1];
       if (monthOfColumn !== lastMonth && (!previous || week - previous.index >= 3) && week <= HEATMAP_WEEKS - 3) {
         monthLabels.push({
           index: week,
-          label: new Intl.DateTimeFormat(undefined, { month: "short" }).format(start + week * 7 * DAY_MS),
+          label: new Intl.DateTimeFormat(undefined, { month: "short", timeZone: "UTC" }).format(columnStart),
         });
       }
       lastMonth = monthOfColumn;
@@ -766,7 +779,7 @@ function ContributionGraph({ days, timezone, index = 0 }: { days: Day[]; timezon
     const at = (fraction: number) =>
       worked.length === 0 ? 0 : worked[Math.min(worked.length - 1, Math.floor(worked.length * fraction))]!;
     return { weeks: cells, months: monthLabels, thresholds: [at(0.25), at(0.5), at(0.75)] };
-  }, [days]);
+  }, [days, timezone]);
 
   const levelOf = (workingMs: number): number => {
     if (workingMs <= 0) return 0;
@@ -1246,10 +1259,11 @@ function Dashboard() {
     // remount anything, so it neither sets `loading` nor `refreshing`.
     if (initial) setLoading(true);
     try {
+      const timezone = viewerTimeZone();
       // The heatmap always shows the trailing year, whatever range is selected.
       const [summary, allTime] = await Promise.all([
-        rpcRef.current.call("getSummary", { range: nextRange }),
-        nextRange === "all" ? null : rpcRef.current.call("getSummary", { range: "all" }),
+        rpcRef.current.call("getSummary", { range: nextRange, timezone }),
+        nextRange === "all" ? null : rpcRef.current.call("getSummary", { range: "all", timezone }),
       ]);
       if (generation !== requestGeneration.current) return;
       setData(summary as Summary);
@@ -1322,7 +1336,7 @@ function Dashboard() {
       ]
     : [];
   const dailyDays = data
-    ? (range === "today" ? recentThreeDays(history?.days ?? [], data.days) : data.days)
+    ? (range === "today" ? recentThreeDays(history?.days ?? [], data.days, data.range.timezone) : data.days)
     : [];
 
   return (
@@ -1457,7 +1471,7 @@ function Dashboard() {
               <Panel
                 index={6}
                 title="When you work"
-                note="Working time by hour of the day, in your server's timezone"
+                note={`Working time by hour of day · ${data.range.timezone}`}
                 icon="moon"
                 action={Math.max(...data.profile.hours) > 0 ? (
                   <Caption>peak {formatHour(data.profile.hours.indexOf(Math.max(...data.profile.hours)))}</Caption>
