@@ -37,7 +37,7 @@ bb plugin install git:https://github.com/MayankBansal12/bb-plugin-wakatime.git@m
 Or pin a release:
 
 ```sh
-bb plugin install git:https://github.com/MayankBansal12/bb-plugin-wakatime.git@semver:^0.1.0 --tag-prefix ""
+bb plugin install git:https://github.com/MayankBansal12/bb-plugin-wakatime.git@semver:^0.5.0 --tag-prefix ""
 ```
 
 ## Use
