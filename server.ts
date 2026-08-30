@@ -98,6 +98,27 @@ interface ThreadSnapshot {
   hostId: string | null; machineName: string | null;
   providerId: string; model: string;
 }
+interface CursorRow {
+  last_seq: number;
+  active_turn_id: string | null;
+  pending_interaction_ids: string;
+}
+
+function parsePendingInteractionIds(value: string | null | undefined): string[] {
+  try {
+    const parsed: unknown = JSON.parse(value ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch { return [] }
+}
+
+function parseInteraction(data: unknown): TurnLifecycleEvent["interaction"] {
+  if (!data || typeof data !== "object") return undefined;
+  const interaction = (data as Record<string, unknown>).interaction;
+  if (!interaction || typeof interaction !== "object") return undefined;
+  const { id, status } = interaction as Record<string, unknown>;
+  return typeof id === "string" && typeof status === "string" ? { id, status } : undefined;
+}
+
 
 export default async function plugin(bb: BbPluginApi) {
   const processStart = Date.now();
@@ -130,7 +151,9 @@ export default async function plugin(bb: BbPluginApi) {
     `CREATE INDEX IF NOT EXISTS idx_turns_open ON turns(thread_id) WHERE ended_at IS NULL`,
     `CREATE TABLE IF NOT EXISTS poll_cursors (
       thread_id TEXT PRIMARY KEY,
-      last_seq INTEGER NOT NULL
+      last_seq INTEGER NOT NULL,
+      active_turn_id TEXT,
+      pending_interaction_ids TEXT NOT NULL DEFAULT '[]'
     )`,
     `CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
@@ -162,6 +185,14 @@ export default async function plugin(bb: BbPluginApi) {
     db.exec(`ALTER TABLE sessions ADD COLUMN machine_name TEXT`);
   }
 
+  const cursorColumns = db.prepare(`PRAGMA table_info(poll_cursors)`).all() as { name: string }[];
+  if (!cursorColumns.some((column) => column.name === "active_turn_id")) {
+    db.exec(`ALTER TABLE poll_cursors ADD COLUMN active_turn_id TEXT`);
+  }
+  if (!cursorColumns.some((column) => column.name === "pending_interaction_ids")) {
+    db.exec(`ALTER TABLE poll_cursors ADD COLUMN pending_interaction_ids TEXT NOT NULL DEFAULT '[]'`);
+  }
+
   const statements = {
     openSession: db.prepare(`INSERT INTO sessions
       (thread_id, project_name, machine_name, started_at) VALUES (?, ?, ?, ?)
@@ -179,6 +210,11 @@ export default async function plugin(bb: BbPluginApi) {
       WHERE session_id = ?`),
     listOpenSessions: db.prepare(`SELECT id, thread_id, started_at FROM sessions
       WHERE ended_at IS NULL`),
+    findSessionCovering: db.prepare(`SELECT id FROM sessions
+      WHERE thread_id = ? AND started_at <= ? AND (ended_at IS NULL OR ended_at > ?)
+      ORDER BY started_at DESC LIMIT 1`),
+    truncateSession: db.prepare(`UPDATE sessions SET ended_at = MAX(started_at, ?)
+      WHERE id = ?`),
     insertTurn: db.prepare(`INSERT INTO turns
       (thread_id, turn_id, session_id, provider_id, model, started_at)
       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(thread_id, turn_id) DO NOTHING`),
@@ -200,9 +236,19 @@ export default async function plugin(bb: BbPluginApi) {
         AND closure_reason = 'open'`),
     findOpenTurn: db.prepare(`SELECT turn_id, started_at FROM turns
       WHERE thread_id = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1`),
-    getCursor: db.prepare(`SELECT last_seq FROM poll_cursors WHERE thread_id = ?`),
-    setCursor: db.prepare(`INSERT INTO poll_cursors (thread_id, last_seq) VALUES (?, ?)
-      ON CONFLICT(thread_id) DO UPDATE SET last_seq = MAX(poll_cursors.last_seq, excluded.last_seq)`),
+    findTurnCovering: db.prepare(`SELECT id FROM turns
+      WHERE thread_id = ? AND started_at <= ? AND (ended_at IS NULL OR ended_at > ?)
+      ORDER BY started_at DESC LIMIT 1`),
+    truncateTurn: db.prepare(`UPDATE turns SET ended_at = MAX(started_at, ?)
+      WHERE id = ?`),
+    getCursor: db.prepare(`SELECT last_seq, active_turn_id, pending_interaction_ids
+      FROM poll_cursors WHERE thread_id = ?`),
+    setCursor: db.prepare(`INSERT INTO poll_cursors
+      (thread_id, last_seq, active_turn_id, pending_interaction_ids) VALUES (?, ?, ?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET
+      last_seq = MAX(poll_cursors.last_seq, excluded.last_seq),
+      active_turn_id = excluded.active_turn_id,
+      pending_interaction_ids = excluded.pending_interaction_ids`),
     setHeartbeat: db.prepare(`INSERT INTO meta (key, value) VALUES ('last_alive', ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value`),
     getHeartbeat: db.prepare(`SELECT value FROM meta WHERE key = 'last_alive'`),
@@ -272,23 +318,61 @@ export default async function plugin(bb: BbPluginApi) {
       try { machineName = (await bb.sdk.hosts.get({ hostId })).name ?? hostId }
       catch { machineName = hostId }
     }
+
     return { projectId, projectName, hostId, machineName, providerId, model };
   }
 
-  const closeThreadIntervals = db.transaction((threadId: string, at: number, reason: string) => {
+  function openSessionInterval(threadId: string, at: number, snapshot: ThreadSnapshot): OpenSession {
+    const result = statements.openSession.run(
+      threadId, snapshot.projectName, snapshot.machineName, at,
+    );
+    const row = result.changes > 0
+      ? { id: Number(result.lastInsertRowid), started_at: at }
+      : statements.findOpenSession.get(threadId) as { id: number; started_at: number };
+    statements.sessionMetadata.run(row.id, snapshot.projectId, snapshot.hostId);
+    const session = { id: row.id, threadId, startedAt: row.started_at };
+    openSessions.set(threadId, session);
+    return session;
+  }
+
+  function closeSessionInterval(threadId: string, at: number, reason: string) {
     const cached = openSessions.get(threadId);
     const stored = statements.findOpenSession.get(threadId) as
       | { id: number; started_at: number } | undefined;
-    const session = cached ?? (stored ? { id: stored.id, threadId, startedAt: stored.started_at } : undefined);
+    const session = cached
+      ?? (stored ? { id: stored.id, threadId, startedAt: stored.started_at } : undefined);
+    if (!session) return;
+    statements.ensureSessionClosure.run(session.id, reason);
+    statements.closeSession.run(at, session.id);
+    statements.closeSessionMetadata.run(reason, session.id);
+    openSessions.delete(threadId);
+  }
+
+  const closeThreadIntervals = db.transaction((threadId: string, at: number, reason: string) => {
     markOpenTurnClosures(threadId, reason);
     statements.closeOpenTurns.run(at, threadId);
     statements.closeOpenTurnMetadata.run(reason, threadId);
-    if (session) {
-      statements.ensureSessionClosure.run(session.id, reason);
-      statements.closeSession.run(at, session.id);
-      statements.closeSessionMetadata.run(reason, session.id);
-    }
+    closeSessionInterval(threadId, at, reason);
   });
+
+  function pauseIntervals(threadId: string, at: number) {
+    const turn = statements.findTurnCovering.get(threadId, at, at) as { id: number } | undefined;
+    if (turn) {
+      statements.ensureTurnClosure.run(turn.id, "interaction-pending");
+      statements.truncateTurn.run(at, turn.id);
+    }
+
+    const session = statements.findSessionCovering.get(threadId, at, at) as
+      | { id: number } | undefined;
+    if (session) {
+      statements.ensureSessionClosure.run(session.id, "interaction-pending");
+      statements.truncateSession.run(at, session.id);
+      statements.closeSessionMetadata.run("interaction-pending", session.id);
+      if (openSessions.get(threadId)?.id === session.id) {
+        openSessions.delete(threadId);
+      }
+    }
+  }
 
   function publishActivityStatus() {
     bb.realtime.publish("activity-status", { active: openSessions.size > 0 });
@@ -297,18 +381,18 @@ export default async function plugin(bb: BbPluginApi) {
   async function markActive(threadId: string, at: number) {
     await withLock(threadId, async () => {
       if (openSessions.has(threadId)) return;
+      startPolling(threadId);
+      const durable = statements.getCursor.get(threadId) as CursorRow | undefined;
+      if (parsePendingInteractionIds(durable?.pending_interaction_ids).length > 0) {
+        await drainEvents(threadId);
+        return;
+      }
       const snapshot = await snapshotThread(threadId);
       const session = db.transaction(() => {
-        const result = statements.openSession.run(threadId, snapshot.projectName, snapshot.machineName, at);
-        const row = result.changes > 0
-          ? { id: Number(result.lastInsertRowid), started_at: at }
-          : statements.findOpenSession.get(threadId) as { id: number; started_at: number };
-        statements.sessionMetadata.run(row.id, snapshot.projectId, snapshot.hostId);
-        return { id: row.id, threadId, startedAt: row.started_at };
+        return openSessionInterval(threadId, at, snapshot);
       })();
       openSessions.set(threadId, session);
       publishActivityStatus();
-      startPolling(threadId);
       await drainEvents(threadId);
     });
   }
@@ -326,39 +410,54 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function drainEvents(threadId: string) {
-    const durable = statements.getCursor.get(threadId) as { last_seq: number } | undefined;
+    const durable = statements.getCursor.get(threadId) as CursorRow | undefined;
     const openTurn = statements.findOpenTurn.get(threadId) as
       | { turn_id: string; started_at: number } | undefined;
     const initial: CollectorCursor = {
       lastSeq: durable?.last_seq ?? 0,
+      activeTurnId: durable?.active_turn_id ?? openTurn?.turn_id ?? null,
       openTurnId: openTurn?.turn_id ?? null,
       openTurnStartedAt: openTurn?.started_at ?? 0,
+      pendingInteractionIds: parsePendingInteractionIds(durable?.pending_interaction_ids),
     };
     const events = await bb.sdk.threads.events.list({
-      threadId, types: ["turn/started", "turn/completed"], order: "asc", limit: "1000",
+      threadId,
+      types: ["turn/started", "turn/completed", "system/interaction/lifecycle"],
+      order: "asc",
+      limit: "1000",
       ...(initial.lastSeq > 0 ? { afterSeq: String(initial.lastSeq) } : {}),
     });
     const lifecycleEvents: TurnLifecycleEvent[] = events
-      .filter((event) => event.type === "turn/started" || event.type === "turn/completed")
+      .filter((event) => event.type === "turn/started"
+        || event.type === "turn/completed"
+        || event.type === "system/interaction/lifecycle")
       .map((event) => ({
         seq: event.seq,
         type: event.type as TurnLifecycleEvent["type"],
         createdAt: event.createdAt,
+        interaction: event.type === "system/interaction/lifecycle"
+          ? parseInteraction(event.data)
+          : undefined,
       }));
     const planned = planTurnEventBatch(initial, lifecycleEvents);
     if (planned.next.lastSeq === initial.lastSeq) { cursors.set(threadId, initial); return }
 
     const startMetadata = new Map<string, ThreadSnapshot>();
     for (const operation of planned.operations) {
-      if (operation.kind === "start" && operation.startedAt >= processStart - POLL_MS) {
+      if (operation.kind === "start" && (operation.startedAt >= processStart - POLL_MS || operation.turnId.includes(":resume:"))) {
         startMetadata.set(operation.turnId, await snapshotThread(threadId));
       }
     }
 
-    const currentSession = openSessions.get(threadId);
+    let activityChanged = false;
     const committedCursor = persistPlannedBatch(planned, {
       transaction: (work) => db.transaction(work)(),
       apply: (operation) => {
+        if (operation.kind === "pause") {
+          pauseIntervals(threadId, operation.endedAt);
+          activityChanged = true;
+          return;
+        }
         if (operation.kind === "close") {
           markOpenTurnClosures(threadId, operation.reason);
           statements.closeOpenTurns.run(operation.endedAt, threadId);
@@ -366,7 +465,15 @@ export default async function plugin(bb: BbPluginApi) {
           return;
         }
         const snapshot = startMetadata.get(operation.turnId);
-        const belongsToCurrentSession = currentSession && operation.startedAt >= currentSession.startedAt;
+        let currentSession = openSessions.get(threadId);
+        if (!currentSession) {
+          currentSession = openSessionInterval(threadId, operation.startedAt, snapshot ?? {
+            projectId: null, projectName: null, hostId: null, machineName: null,
+            providerId: "Unknown", model: "unknown",
+          });
+          activityChanged = true;
+        }
+        const belongsToCurrentSession = operation.startedAt >= currentSession.startedAt;
         statements.insertTurn.run(
           threadId, operation.turnId, belongsToCurrentSession ? currentSession.id : null,
           snapshot?.providerId ?? "", snapshot?.model ?? "unknown", operation.startedAt,
@@ -374,9 +481,14 @@ export default async function plugin(bb: BbPluginApi) {
         const turn = statements.findTurn.get(threadId, operation.turnId) as { id: number };
         statements.turnMetadata.run(turn.id, snapshot ? "sampled-live" : "historical-unknown");
       },
-      persistCursor: (lastSeq) => { statements.setCursor.run(threadId, lastSeq) },
+      persistCursor: (next) => {
+        statements.setCursor.run(
+          threadId, next.lastSeq, next.activeTurnId, JSON.stringify(next.pendingInteractionIds),
+        );
+      },
     });
     cursors.set(threadId, committedCursor);
+    if (activityChanged) publishActivityStatus();
   }
 
   function markInactive(threadId: string, at: number, reason: string) {

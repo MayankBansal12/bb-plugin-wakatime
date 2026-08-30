@@ -1,4 +1,4 @@
-import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
+import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it } from "vitest";
 import plugin from "./server.js";
 
@@ -68,6 +68,59 @@ describe("plugin integration", () => {
       turnCount: 1,
       sampledTurnCount: 1,
     }]);
+    await harness.lifecycle.dispose();
+  });
+
+  it("truncates stored turn and session intervals when an approval becomes pending", async () => {
+    const now = Date.now();
+    const pendingAt = now + 200;
+    const events = [
+      {
+        seq: 10,
+        type: "turn/started",
+        createdAt: now + 100,
+        data: {},
+      },
+      {
+        seq: 20,
+        type: "system/interaction/lifecycle",
+        createdAt: pendingAt,
+        data: { interaction: { id: "approval-1", status: "pending" } },
+      },
+    ];
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "wakatime",
+      sdk: {
+        threads: {
+          list: async () => [],
+          events: { list: async () => events as never },
+        },
+      },
+    });
+    await plugin(bb);
+
+    await harness.behavior.emitThreadEvent("thread.active", {
+      thread: makeThreadResponse({ id: "thread-waiting", status: "active" }),
+    });
+    const db = bb.storage.database();
+    await expect.poll(() => db.prepare(
+      `SELECT ended_at FROM turns WHERE thread_id = 'thread-waiting'`,
+    ).get()).toEqual({ ended_at: pendingAt });
+
+    expect(db.prepare(
+      `SELECT ended_at FROM sessions WHERE thread_id = 'thread-waiting'`,
+    ).get()).toEqual({ ended_at: pendingAt });
+    expect(db.prepare(
+      `SELECT closure_reason FROM turn_metadata
+       WHERE turn_row_id = (SELECT id FROM turns WHERE thread_id = 'thread-waiting')`,
+    ).get()).toEqual({ closure_reason: "interaction-pending" });
+    expect(db.prepare(
+      `SELECT active_turn_id, pending_interaction_ids FROM poll_cursors
+       WHERE thread_id = 'thread-waiting'`,
+    ).get()).toEqual({
+      active_turn_id: "10",
+      pending_interaction_ids: '["approval-1"]',
+    });
     await harness.lifecycle.dispose();
   });
 
