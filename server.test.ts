@@ -71,14 +71,15 @@ describe("plugin integration", () => {
     await harness.lifecycle.dispose();
   });
 
-  it("truncates stored turn and session intervals when an approval becomes pending", async () => {
+  it("replays an already-pending approval before inferring an active session", async () => {
     const now = Date.now();
-    const pendingAt = now + 200;
+    const turnStartedAt = now - 200;
+    const pendingAt = now - 100;
     const events = [
       {
         seq: 10,
         type: "turn/started",
-        createdAt: now + 100,
+        createdAt: turnStartedAt,
         data: {},
       },
       {
@@ -110,6 +111,10 @@ describe("plugin integration", () => {
     expect(db.prepare(
       `SELECT ended_at FROM sessions WHERE thread_id = 'thread-waiting'`,
     ).get()).toEqual({ ended_at: pendingAt });
+    expect(db.prepare(
+      `SELECT COUNT(*) AS count FROM sessions
+       WHERE thread_id = 'thread-waiting' AND ended_at IS NULL`,
+    ).get()).toEqual({ count: 0 });
     expect(db.prepare(
       `SELECT closure_reason FROM turn_metadata
        WHERE turn_row_id = (SELECT id FROM turns WHERE thread_id = 'thread-waiting')`,
