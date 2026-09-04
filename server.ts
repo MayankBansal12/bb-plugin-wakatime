@@ -395,23 +395,23 @@ export default async function plugin(bb: BbPluginApi) {
     await withLock(threadId, async () => {
       if (openSessions.has(threadId)) return;
       startPolling(threadId);
-
-      // Drain first. On upgrade, the durable cursor may predate interaction
-      // tracking even though the thread is already waiting for approval. If
-      // we open from `active` before replaying that event, its old timestamp
-      // cannot truncate the newer inferred session and every later hour is
-      // incorrectly counted as working time.
-      await drainEvents(threadId);
-      if (openSessions.has(threadId)) return;
       const durable = statements.getCursor.get(threadId) as CursorRow | undefined;
-      if (parsePendingInteractionIds(durable?.pending_interaction_ids).length > 0) return;
+      if (parsePendingInteractionIds(durable?.pending_interaction_ids).length > 0) {
+        await drainEvents(threadId);
+        return;
+      }
 
+      // Anchor inferred working time to the observed active transition before
+      // replaying history. Otherwise a missing cursor can backdate this
+      // session to the thread's oldest retained turn. If replay discovers an
+      // older pending interaction, pauseIntervals reduces this row to zero.
       const snapshot = await snapshotThread(threadId);
       const session = db.transaction(() => {
         return openSessionInterval(threadId, at, snapshot);
       })();
       openSessions.set(threadId, session);
       publishActivityStatus();
+      await drainEvents(threadId);
     });
   }
 
