@@ -71,7 +71,7 @@ describe("plugin integration", () => {
     await harness.lifecycle.dispose();
   });
 
-  it("replays an already-pending approval before inferring an active session", async () => {
+  it("zeroes an inferred active session when replay discovers an older pending approval", async () => {
     const now = Date.now();
     const turnStartedAt = now - 200;
     const pendingAt = now - 100;
@@ -108,9 +108,11 @@ describe("plugin integration", () => {
       `SELECT ended_at FROM turns WHERE thread_id = 'thread-waiting'`,
     ).get()).toEqual({ ended_at: pendingAt });
 
-    expect(db.prepare(
-      `SELECT ended_at FROM sessions WHERE thread_id = 'thread-waiting'`,
-    ).get()).toEqual({ ended_at: pendingAt });
+    const inferredSession = db.prepare(
+      `SELECT started_at, ended_at FROM sessions WHERE thread_id = 'thread-waiting'`,
+    ).get() as { started_at: number; ended_at: number };
+    expect(inferredSession.started_at).toBeGreaterThanOrEqual(now);
+    expect(inferredSession.ended_at).toBe(inferredSession.started_at);
     expect(db.prepare(
       `SELECT COUNT(*) AS count FROM sessions
        WHERE thread_id = 'thread-waiting' AND ended_at IS NULL`,
@@ -126,6 +128,51 @@ describe("plugin integration", () => {
       active_turn_id: "10",
       pending_interaction_ids: '["approval-1"]',
     });
+    await harness.lifecycle.dispose();
+  });
+
+  it("does not backdate a new active session while replaying historical turns", async () => {
+    const now = Date.now();
+    const historicalStart = now - 24 * 60 * 60 * 1_000;
+    const events = [
+      {
+        seq: 10,
+        type: "turn/started",
+        createdAt: historicalStart,
+        data: {},
+      },
+      {
+        seq: 20,
+        type: "turn/completed",
+        createdAt: historicalStart + 60_000,
+        data: {},
+      },
+    ];
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "wakatime",
+      sdk: {
+        threads: {
+          list: async () => [],
+          events: { list: async () => events as never },
+        },
+      },
+    });
+    await plugin(bb);
+
+    await harness.behavior.emitThreadEvent("thread.active", {
+      thread: makeThreadResponse({ id: "thread-existing", status: "active" }),
+    });
+    const db = bb.storage.database();
+    await expect.poll(() => db.prepare(
+      `SELECT started_at, ended_at FROM sessions WHERE thread_id = 'thread-existing'`,
+    ).get()).toEqual({ started_at: expect.any(Number), ended_at: null });
+
+    const session = db.prepare(
+      `SELECT started_at, ended_at FROM sessions WHERE thread_id = 'thread-existing'`,
+    ).get() as { started_at: number; ended_at: number | null };
+    expect(session.started_at).toBeGreaterThanOrEqual(now);
+    expect(session.started_at).toBeGreaterThan(historicalStart + 60_000);
+    expect(session.ended_at).toBeNull();
     await harness.lifecycle.dispose();
   });
 
