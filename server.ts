@@ -372,6 +372,19 @@ export default async function plugin(bb: BbPluginApi) {
         openSessions.delete(threadId);
       }
     }
+
+    // A lifecycle replay can discover an old pending interaction after a
+    // newer session was inferred from the thread's current `active` status.
+    // That session cannot cover `at`, but it is entirely inside the waiting
+    // period and must not remain open. Preserve the row for auditability while
+    // reducing it to zero duration.
+    const inferred = openSessions.get(threadId);
+    if (inferred && inferred.startedAt > at) {
+      statements.ensureSessionClosure.run(inferred.id, "interaction-pending");
+      statements.truncateSession.run(inferred.startedAt, inferred.id);
+      statements.closeSessionMetadata.run("interaction-pending", inferred.id);
+      openSessions.delete(threadId);
+    }
   }
 
   function publishActivityStatus() {
@@ -382,18 +395,23 @@ export default async function plugin(bb: BbPluginApi) {
     await withLock(threadId, async () => {
       if (openSessions.has(threadId)) return;
       startPolling(threadId);
+
+      // Drain first. On upgrade, the durable cursor may predate interaction
+      // tracking even though the thread is already waiting for approval. If
+      // we open from `active` before replaying that event, its old timestamp
+      // cannot truncate the newer inferred session and every later hour is
+      // incorrectly counted as working time.
+      await drainEvents(threadId);
+      if (openSessions.has(threadId)) return;
       const durable = statements.getCursor.get(threadId) as CursorRow | undefined;
-      if (parsePendingInteractionIds(durable?.pending_interaction_ids).length > 0) {
-        await drainEvents(threadId);
-        return;
-      }
+      if (parsePendingInteractionIds(durable?.pending_interaction_ids).length > 0) return;
+
       const snapshot = await snapshotThread(threadId);
       const session = db.transaction(() => {
         return openSessionInterval(threadId, at, snapshot);
       })();
       openSessions.set(threadId, session);
       publishActivityStatus();
-      await drainEvents(threadId);
     });
   }
 
