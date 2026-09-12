@@ -51,8 +51,8 @@ describe("plugin integration", () => {
       VALUES ('thread-model', '1', ?, 'codex', 'gpt-test', ?, ?)`
     ).run(Number(session.lastInsertRowid), now - 50_000, now - 10_000);
     db.prepare(`INSERT INTO turn_metadata
-      (turn_row_id, attribution_quality, closure_reason)
-      VALUES (?, 'sampled-live', 'completed')`
+      (turn_row_id, attribution_quality, closure_reason, accounting_version)
+      VALUES (?, 'sampled-live', 'completed', 3)`
     ).run(Number(turn.lastInsertRowid));
     const populated = await harness.behavior.callRpc("getSummary", {
       range: "today",
@@ -71,7 +71,7 @@ describe("plugin integration", () => {
     await harness.lifecycle.dispose();
   });
 
-  it("zeroes an inferred active session when replay discovers an older pending approval", async () => {
+  it("bounds historical work at an older pending approval", async () => {
     const now = Date.now();
     const turnStartedAt = now - 200;
     const pendingAt = now - 100;
@@ -111,8 +111,8 @@ describe("plugin integration", () => {
     const inferredSession = db.prepare(
       `SELECT started_at, ended_at FROM sessions WHERE thread_id = 'thread-waiting'`,
     ).get() as { started_at: number; ended_at: number };
-    expect(inferredSession.started_at).toBeGreaterThanOrEqual(now);
-    expect(inferredSession.ended_at).toBe(inferredSession.started_at);
+    expect(inferredSession.started_at).toBe(turnStartedAt);
+    expect(inferredSession.ended_at).toBe(pendingAt);
     expect(db.prepare(
       `SELECT COUNT(*) AS count FROM sessions
        WHERE thread_id = 'thread-waiting' AND ended_at IS NULL`,
@@ -131,7 +131,7 @@ describe("plugin integration", () => {
     await harness.lifecycle.dispose();
   });
 
-  it("does not backdate a new active session while replaying historical turns", async () => {
+  it("records only the bounded historical turn without inferring current activity", async () => {
     const now = Date.now();
     const historicalStart = now - 24 * 60 * 60 * 1_000;
     const events = [
@@ -165,14 +165,15 @@ describe("plugin integration", () => {
     const db = bb.storage.database();
     await expect.poll(() => db.prepare(
       `SELECT started_at, ended_at FROM sessions WHERE thread_id = 'thread-existing'`,
-    ).get()).toEqual({ started_at: expect.any(Number), ended_at: null });
+    ).get()).toEqual({ started_at: historicalStart, ended_at: historicalStart + 60_000 });
 
     const session = db.prepare(
       `SELECT started_at, ended_at FROM sessions WHERE thread_id = 'thread-existing'`,
     ).get() as { started_at: number; ended_at: number | null };
-    expect(session.started_at).toBeGreaterThanOrEqual(now);
-    expect(session.started_at).toBeGreaterThan(historicalStart + 60_000);
-    expect(session.ended_at).toBeNull();
+    expect(session.started_at).toBe(historicalStart);
+    expect(session.ended_at).toBe(historicalStart + 60_000);
+    const summary = await harness.behavior.callRpc("getSummary", { range: "all" });
+    expect(summary).toMatchObject({ workingMs: 60_000 });
     await harness.lifecycle.dispose();
   });
 

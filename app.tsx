@@ -1510,7 +1510,7 @@ function Dashboard() {
             </div>
 
             <div className="wk-grid wk-duo">
-              <Panel index={10} title="Projects" note="Union of active thread time per project" icon="folder">
+              <Panel index={10} title="Projects" note="Union of active agent-turn time per project" icon="folder">
                 <MeterList
                   total={projectTotal}
                   rows={data.projects.slice(0, 5).map((row, index) => ({
@@ -1528,9 +1528,8 @@ function Dashboard() {
                   { label: "Typical turn", value: formatDuration(data.pace.medianTurnMs) },
                   { label: "Slowest 10%", value: formatDuration(data.pace.p90TurnMs) },
                   { label: "Turns per hour", value: data.pace.turnsPerActiveHour.toFixed(1) },
-                  { label: "Busy share", value: `${Math.min(100, data.pace.coveragePercent).toFixed(0)}%` },
                   { label: "Longest wait", value: formatDuration(data.pace.longestIdleRunwayMs) },
-                  { label: "Sessions", value: data.quality.sessionCount.toLocaleString() },
+                  { label: "Activity segments", value: data.quality.sessionCount.toLocaleString() },
                   { label: "Busiest day", value: data.streak.busiestDay ? formatDate(data.streak.busiestDay.date) : "—",
                     hint: data.streak.busiestDay ? formatDuration(data.streak.busiestDay.workingMs) : undefined },
                   { label: "Best streak", value: `${data.streak.longestDays}`, hint: "days" },
@@ -1539,7 +1538,7 @@ function Dashboard() {
             </div>
 
             {data.machines.length > 0 ? (
-              <Panel index={12} title="Machines" note="Union of active thread time per machine" icon="monitor">
+              <Panel index={12} title="Machines" note="Union of active agent-turn time per machine" icon="monitor">
                 <MachineList machines={data.machines} />
               </Panel>
             ) : null}

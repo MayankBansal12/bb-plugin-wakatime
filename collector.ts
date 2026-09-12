@@ -69,7 +69,7 @@ export function planTurnEventBatch(
       next.openTurnId = null;
       next.openTurnStartedAt = 0;
       next.pendingInteractionIds = [];
-    } else if (event.interaction?.status === "pending") {
+    } else if ((event.interaction?.status === "pending" || event.interaction?.status === "resolving")) {
       const wasPending = next.pendingInteractionIds.length > 0;
       if (!next.pendingInteractionIds.includes(event.interaction.id)) {
         next.pendingInteractionIds.push(event.interaction.id);
@@ -79,11 +79,19 @@ export function planTurnEventBatch(
       }
       next.openTurnId = null;
       next.openTurnStartedAt = 0;
+    } else if (event.interaction?.status === "interrupted") {
+      // An interrupted/denied interaction is not evidence the agent resumed.
+      if (next.openTurnId) operations.push({ kind: "pause", endedAt: event.createdAt });
+      next.activeTurnId = null;
+      next.openTurnId = null;
+      next.openTurnStartedAt = 0;
+      next.pendingInteractionIds = [];
     } else if (event.interaction?.status === "resolved") {
+      const wasPending = next.pendingInteractionIds.includes(event.interaction.id);
       next.pendingInteractionIds = next.pendingInteractionIds.filter(
         (id) => id !== event.interaction?.id,
       );
-      if (next.activeTurnId && !next.openTurnId && next.pendingInteractionIds.length === 0) {
+      if (wasPending && next.activeTurnId && !next.openTurnId && next.pendingInteractionIds.length === 0) {
         next.openTurnId = `${next.activeTurnId}:resume:${event.seq}`;
         next.openTurnStartedAt = event.createdAt;
         operations.push({ kind: "start", turnId: next.openTurnId, startedAt: event.createdAt });
@@ -104,4 +112,22 @@ export function persistPlannedBatch(
     persistence.persistCursor(planned.next);
     return planned.next;
   });
+}
+
+/** Reconstruct only closed, evidenced portions of logical historical turns. */
+export function historicalTurnEvidence(events: readonly TurnLifecycleEvent[]) {
+  const initial: CollectorCursor = { lastSeq: 0, activeTurnId: null, openTurnId: null,
+    openTurnStartedAt: 0, pendingInteractionIds: [] };
+  const intervals: { turnId: string; start: number; end: number }[] = [];
+  let open: { turnId: string; start: number } | null = null;
+  for (const op of planTurnEventBatch(initial, events).operations) {
+    if (op.kind === 'start') open = { turnId: op.turnId.split(':')[0]!, start: op.startedAt };
+    else {
+      if (open && (op.kind === 'pause' || op.reason === 'completed') && op.endedAt > open.start) {
+        intervals.push({ ...open, end: op.endedAt });
+      }
+      open = null;
+    }
+  }
+  return intervals;
 }
