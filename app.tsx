@@ -1528,7 +1528,6 @@ function Dashboard() {
                   { label: "Typical turn", value: formatDuration(data.pace.medianTurnMs) },
                   { label: "Slowest 10%", value: formatDuration(data.pace.p90TurnMs) },
                   { label: "Turns per hour", value: data.pace.turnsPerActiveHour.toFixed(1) },
-                  { label: "Longest wait", value: formatDuration(data.pace.longestIdleRunwayMs) },
                   { label: "Activity segments", value: data.quality.sessionCount.toLocaleString() },
                   { label: "Busiest day", value: data.streak.busiestDay ? formatDate(data.streak.busiestDay.date) : "—",
                     hint: data.streak.busiestDay ? formatDuration(data.streak.busiestDay.workingMs) : undefined },

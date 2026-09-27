@@ -91,9 +91,6 @@ conservatively excluded, not guessed.
 This can undercount older activity or the last few seconds before a missed
 completion; it prevents those gaps from becoming hours or days of work.
 
-See [the inactive-time audit](docs/inactive-time-audit.md) for the failure cases
-and regression coverage.
-
 ## Development
 
 ```sh
