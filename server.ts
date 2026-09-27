@@ -2,7 +2,6 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
   aggregateAnalytics,
-  crashRecoveryEnd,
   isValidTimeZone,
   normalizeTimeZone,
   rangeStart,
@@ -12,14 +11,14 @@ import {
 } from "./analytics.js";
 import {
   planTurnEventBatch,
+  historicalTurnEvidence,
   persistPlannedBatch,
   type CollectorCursor,
   type TurnLifecycleEvent,
 } from "./collector.js";
 
 const POLL_MS = 10_000;
-const HEARTBEAT_MS = 30_000;
-const HEARTBEAT_GRACE_MS = 90_000;
+const OBSERVATION_GAP_MS = 3 * POLL_MS;
 
 const breakdownSchema = z
   .object({ name: z.string(), workingMs: z.number(), activeMs: z.number() })
@@ -92,7 +91,6 @@ export const rpcContract = defineRpcContract({
   },
 });
 
-interface OpenSession { id: number; threadId: string; startedAt: number }
 interface ThreadSnapshot {
   projectId: string | null; projectName: string | null;
   hostId: string | null; machineName: string | null;
@@ -173,6 +171,19 @@ export default async function plugin(bb: BbPluginApi) {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_session_metadata_project ON session_metadata(project_id)`,
     `CREATE INDEX IF NOT EXISTS idx_turn_metadata_quality ON turn_metadata(attribution_quality)`,
+    // Per-turn evidence, never the plugin process's heartbeat.
+    `CREATE TABLE IF NOT EXISTS turn_observations (
+      turn_row_id INTEGER PRIMARY KEY,
+      confirmed_at INTEGER NOT NULL
+    )`,
+    `ALTER TABLE turn_metadata ADD COLUMN accounting_version INTEGER NOT NULL DEFAULT 0`,
+    `CREATE TABLE IF NOT EXISTS turn_history_segments (
+      turn_row_id INTEGER NOT NULL,
+      ordinal INTEGER NOT NULL,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER NOT NULL,
+      PRIMARY KEY (turn_row_id, ordinal)
+    )`,
   ]);
 
   // v0.1 used project_id/machine_id columns. Keep its table and every row;
@@ -193,98 +204,81 @@ export default async function plugin(bb: BbPluginApi) {
     db.exec(`ALTER TABLE poll_cursors ADD COLUMN pending_interaction_ids TEXT NOT NULL DEFAULT '[]'`);
   }
 
-  const statements = {
-    openSession: db.prepare(`INSERT INTO sessions
-      (thread_id, project_name, machine_name, started_at) VALUES (?, ?, ?, ?)
-      ON CONFLICT(thread_id) WHERE ended_at IS NULL DO NOTHING`),
-    findOpenSession: db.prepare(`SELECT id, started_at FROM sessions
-      WHERE thread_id = ? AND ended_at IS NULL`),
-    sessionMetadata: db.prepare(`INSERT INTO session_metadata
-      (session_id, project_id, host_id, quality, closure_reason)
-      VALUES (?, ?, ?, 'observed', 'open') ON CONFLICT(session_id) DO UPDATE SET
-      project_id = COALESCE(session_metadata.project_id, excluded.project_id),
-      host_id = COALESCE(session_metadata.host_id, excluded.host_id)`),
-    closeSession: db.prepare(`UPDATE sessions SET ended_at = MAX(started_at, ?)
-      WHERE id = ? AND ended_at IS NULL`),
-    closeSessionMetadata: db.prepare(`UPDATE session_metadata SET closure_reason = ?
-      WHERE session_id = ?`),
-    listOpenSessions: db.prepare(`SELECT id, thread_id, started_at FROM sessions
-      WHERE ended_at IS NULL`),
-    findSessionCovering: db.prepare(`SELECT id FROM sessions
-      WHERE thread_id = ? AND started_at <= ? AND (ended_at IS NULL OR ended_at > ?)
-      ORDER BY started_at DESC LIMIT 1`),
-    truncateSession: db.prepare(`UPDATE sessions SET ended_at = MAX(started_at, ?)
-      WHERE id = ?`),
-    insertTurn: db.prepare(`INSERT INTO turns
-      (thread_id, turn_id, session_id, provider_id, model, started_at)
-      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(thread_id, turn_id) DO NOTHING`),
-    findTurn: db.prepare(`SELECT id FROM turns WHERE thread_id = ? AND turn_id = ?`),
-    turnMetadata: db.prepare(`INSERT INTO turn_metadata
-      (turn_row_id, attribution_quality, closure_reason) VALUES (?, ?, 'open')
-      ON CONFLICT(turn_row_id) DO NOTHING`),
-    openTurnRows: db.prepare(`SELECT id FROM turns WHERE thread_id = ? AND ended_at IS NULL`),
-    ensureTurnClosure: db.prepare(`INSERT INTO turn_metadata
-      (turn_row_id, attribution_quality, closure_reason) VALUES (?, 'legacy-unknown', ?)
-      ON CONFLICT(turn_row_id) DO UPDATE SET closure_reason = excluded.closure_reason`),
-    ensureSessionClosure: db.prepare(`INSERT INTO session_metadata
-      (session_id, quality, closure_reason) VALUES (?, 'legacy-unknown', ?)
-      ON CONFLICT(session_id) DO UPDATE SET closure_reason = excluded.closure_reason`),
-    closeOpenTurns: db.prepare(`UPDATE turns SET ended_at = MAX(started_at, ?)
-      WHERE thread_id = ? AND ended_at IS NULL`),
-    closeOpenTurnMetadata: db.prepare(`UPDATE turn_metadata SET closure_reason = ?
-      WHERE turn_row_id IN (SELECT id FROM turns WHERE thread_id = ? AND ended_at IS NOT NULL)
-        AND closure_reason = 'open'`),
-    findOpenTurn: db.prepare(`SELECT turn_id, started_at FROM turns
-      WHERE thread_id = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1`),
-    findTurnCovering: db.prepare(`SELECT id FROM turns
-      WHERE thread_id = ? AND started_at <= ? AND (ended_at IS NULL OR ended_at > ?)
-      ORDER BY started_at DESC LIMIT 1`),
-    truncateTurn: db.prepare(`UPDATE turns SET ended_at = MAX(started_at, ?)
-      WHERE id = ?`),
-    getCursor: db.prepare(`SELECT last_seq, active_turn_id, pending_interaction_ids
-      FROM poll_cursors WHERE thread_id = ?`),
-    setCursor: db.prepare(`INSERT INTO poll_cursors
-      (thread_id, last_seq, active_turn_id, pending_interaction_ids) VALUES (?, ?, ?, ?)
-      ON CONFLICT(thread_id) DO UPDATE SET
-      last_seq = MAX(poll_cursors.last_seq, excluded.last_seq),
-      active_turn_id = excluded.active_turn_id,
-      pending_interaction_ids = excluded.pending_interaction_ids`),
-    setHeartbeat: db.prepare(`INSERT INTO meta (key, value) VALUES ('last_alive', ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value`),
-    getHeartbeat: db.prepare(`SELECT value FROM meta WHERE key = 'last_alive'`),
-  };
-
-  const persistedHeartbeat = (() => {
-    const row = statements.getHeartbeat.get() as { value: string } | undefined;
-    if (!row) return null;
-    const value = Number(row.value);
-    return Number.isFinite(value) ? Math.min(value, processStart) : null;
-  })();
-
-  const openSessions = new Map<string, OpenSession>();
-  const cursors = new Map<string, CollectorCursor>();
+  let disposed = false;
+  const abort = new AbortController();
   const locks = new Map<string, Promise<void>>();
-  const pollers = new Map<string, ReturnType<typeof setInterval>>();
+  const watched = new Set<string>();
+  const openTurn = db.prepare(`SELECT t.id, t.turn_id, t.session_id, t.started_at,
+    o.confirmed_at FROM turns t LEFT JOIN turn_observations o ON o.turn_row_id = t.id
+    WHERE t.thread_id = ? AND t.ended_at IS NULL ORDER BY t.id DESC LIMIT 1`);
+  const cursorQuery = db.prepare(`SELECT last_seq, active_turn_id, pending_interaction_ids
+    FROM poll_cursors WHERE thread_id = ?`);
+  const saveCursor = db.prepare(`INSERT INTO poll_cursors
+    (thread_id, last_seq, active_turn_id, pending_interaction_ids) VALUES (?, ?, ?, ?)
+    ON CONFLICT(thread_id) DO UPDATE SET last_seq = excluded.last_seq,
+    active_turn_id = excluded.active_turn_id, pending_interaction_ids = excluded.pending_interaction_ids`);
+  type OpenTurn = { id: number; turn_id: string; session_id: number | null;
+    started_at: number; confirmed_at: number | null };
 
-  function markOpenTurnClosures(threadId: string, reason: string) {
-    for (const row of statements.openTurnRows.all(threadId) as { id: number }[]) {
-      statements.ensureTurnClosure.run(row.id, reason);
+  // No caches are changed inside a database transaction. A failed page can be
+  // replayed without leaving an in-memory session that was rolled back.
+  function closeIntervals(threadId: string, at: number | null, reason: string) {
+    const rows = db.prepare(`SELECT t.id, t.started_at, o.confirmed_at FROM turns t
+      LEFT JOIN turn_observations o ON o.turn_row_id = t.id
+      WHERE t.thread_id = ? AND t.ended_at IS NULL`).all(threadId) as
+      { id: number; started_at: number; confirmed_at: number | null }[];
+    for (const row of rows) {
+      const end = Math.max(row.started_at, at ?? row.confirmed_at ?? row.started_at);
+      db.prepare(`UPDATE turns SET ended_at = ? WHERE id = ?`).run(end, row.id);
+      db.prepare(`INSERT INTO turn_metadata (turn_row_id, attribution_quality, closure_reason)
+        VALUES (?, 'historical-unknown', ?) ON CONFLICT(turn_row_id)
+        DO UPDATE SET closure_reason = excluded.closure_reason`).run(row.id, reason);
     }
+    // Sessions carry attribution only. They are never independently counted.
+    db.prepare(`UPDATE sessions SET ended_at = MAX(started_at, COALESCE(?, started_at))
+      WHERE thread_id = ? AND ended_at IS NULL`).run(at, threadId);
+    db.prepare(`UPDATE session_metadata SET closure_reason = ? WHERE session_id IN
+      (SELECT id FROM sessions WHERE thread_id = ? AND ended_at IS NOT NULL)
+      AND closure_reason = 'open'`).run(reason, threadId);
   }
 
-  function withLock(threadId: string, work: () => Promise<unknown>): Promise<void> {
+  function startInterval(threadId: string, turnId: string, at: number, snapshot?: ThreadSnapshot) {
+    if (db.prepare(`SELECT id FROM turns WHERE thread_id = ? AND turn_id = ?`).get(threadId, turnId)) return;
+    closeIntervals(threadId, null, 'superseded');
+    const session = db.prepare(`INSERT INTO sessions
+      (thread_id, project_name, machine_name, started_at) VALUES (?, ?, ?, ?)`)
+      .run(threadId, snapshot?.projectName ?? null, snapshot?.machineName ?? null, at);
+    const sessionId = Number(session.lastInsertRowid);
+    db.prepare(`INSERT INTO session_metadata
+      (session_id, project_id, host_id, quality, closure_reason) VALUES (?, ?, ?, ?, 'open')`)
+      .run(sessionId, snapshot?.projectId ?? null, snapshot?.hostId ?? null,
+        snapshot ? 'observed' : 'historical');
+    const turn = db.prepare(`INSERT INTO turns
+      (thread_id, turn_id, session_id, provider_id, model, started_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(threadId, turnId, sessionId, snapshot?.providerId ?? '', snapshot?.model ?? 'unknown', at);
+    db.prepare(`INSERT INTO turn_metadata (turn_row_id, attribution_quality, closure_reason, accounting_version)
+      VALUES (?, ?, 'open', 3)`).run(Number(turn.lastInsertRowid), snapshot ? 'sampled-live' : 'historical-unknown');
+  }
+
+  function isActive() {
+    const row = db.prepare(`SELECT 1 FROM turns t JOIN turn_observations o ON o.turn_row_id = t.id
+      WHERE t.ended_at IS NULL AND o.confirmed_at >= ? LIMIT 1`).get(Date.now() - OBSERVATION_GAP_MS);
+    return Boolean(row);
+  }
+  function publishActivityStatus() {
+    if (!disposed) bb.realtime.publish('activity-status', { active: isActive() });
+  }
+  function withLock(threadId: string, work: () => Promise<void>): Promise<void> {
     const previous = locks.get(threadId) ?? Promise.resolve();
-    const next = previous.then(work, work).then(() => undefined, () => undefined);
+    const next = previous.then(async () => { if (!disposed) await work(); }).catch((error) => {
+      if (!disposed) {
+        db.transaction(() => closeIntervals(threadId, null, 'observation-failed'))();
+        publishActivityStatus();
+        bb.log.warn(`activity verification failed for ${threadId}: ${String(error)}`);
+      }
+    }).finally(() => { if (locks.get(threadId) === next) locks.delete(threadId); });
     locks.set(threadId, next);
     return next;
-  }
-
-  function sleep(ms: number, signal: AbortSignal): Promise<void> {
-    return new Promise((resolve) => {
-      const timer = setTimeout(done, ms);
-      function done() { clearTimeout(timer); signal.removeEventListener("abort", done); resolve() }
-      signal.addEventListener("abort", done, { once: true });
-    });
   }
 
   async function snapshotThread(threadId: string): Promise<ThreadSnapshot> {
@@ -322,269 +316,245 @@ export default async function plugin(bb: BbPluginApi) {
     return { projectId, projectName, hostId, machineName, providerId, model };
   }
 
-  function openSessionInterval(threadId: string, at: number, snapshot: ThreadSnapshot): OpenSession {
-    const result = statements.openSession.run(
-      threadId, snapshot.projectName, snapshot.machineName, at,
-    );
-    const row = result.changes > 0
-      ? { id: Number(result.lastInsertRowid), started_at: at }
-      : statements.findOpenSession.get(threadId) as { id: number; started_at: number };
-    statements.sessionMetadata.run(row.id, snapshot.projectId, snapshot.hostId);
-    const session = { id: row.id, threadId, startedAt: row.started_at };
-    openSessions.set(threadId, session);
-    return session;
-  }
-
-  function closeSessionInterval(threadId: string, at: number, reason: string) {
-    const cached = openSessions.get(threadId);
-    const stored = statements.findOpenSession.get(threadId) as
-      | { id: number; started_at: number } | undefined;
-    const session = cached
-      ?? (stored ? { id: stored.id, threadId, startedAt: stored.started_at } : undefined);
-    if (!session) return;
-    statements.ensureSessionClosure.run(session.id, reason);
-    statements.closeSession.run(at, session.id);
-    statements.closeSessionMetadata.run(reason, session.id);
-    openSessions.delete(threadId);
-  }
-
-  const closeThreadIntervals = db.transaction((threadId: string, at: number, reason: string) => {
-    markOpenTurnClosures(threadId, reason);
-    statements.closeOpenTurns.run(at, threadId);
-    statements.closeOpenTurnMetadata.run(reason, threadId);
-    closeSessionInterval(threadId, at, reason);
-  });
-
-  function pauseIntervals(threadId: string, at: number) {
-    const turn = statements.findTurnCovering.get(threadId, at, at) as { id: number } | undefined;
-    if (turn) {
-      statements.ensureTurnClosure.run(turn.id, "interaction-pending");
-      statements.truncateTurn.run(at, turn.id);
-    }
-
-    const session = statements.findSessionCovering.get(threadId, at, at) as
-      | { id: number } | undefined;
-    if (session) {
-      statements.ensureSessionClosure.run(session.id, "interaction-pending");
-      statements.truncateSession.run(at, session.id);
-      statements.closeSessionMetadata.run("interaction-pending", session.id);
-      if (openSessions.get(threadId)?.id === session.id) {
-        openSessions.delete(threadId);
+  async function drainEvents(threadId: string) {
+    // Finish every page before any open turn is considered live. A page ending
+    // at a historical start is not evidence that the turn is still running.
+    for (let page = 0; page < 100; page += 1) {
+      const durable = cursorQuery.get(threadId) as CursorRow | undefined;
+      const open = openTurn.get(threadId) as OpenTurn | undefined;
+      const pending = parsePendingInteractionIds(durable?.pending_interaction_ids);
+      const initial: CollectorCursor = {
+        lastSeq: durable?.last_seq ?? 0,
+        activeTurnId: durable?.active_turn_id ?? null,
+        openTurnId: pending.length ? null : (open?.turn_id ?? durable?.active_turn_id ?? null),
+        openTurnStartedAt: open?.started_at ?? 0,
+        pendingInteractionIds: pending,
+      };
+      const events = await bb.sdk.threads.events.list({ threadId,
+        types: ['turn/started', 'turn/completed', 'system/interaction/lifecycle'],
+        order: 'asc', limit: '1000', signal: abort.signal,
+        ...(initial.lastSeq > 0 ? { afterSeq: String(initial.lastSeq) } : {}),
+      });
+      if (disposed) return;
+      if (events.some((event) => !Number.isFinite(event.createdAt) || event.createdAt < 0
+        || event.createdAt > Date.now() || !Number.isSafeInteger(event.seq) || event.seq < 0)) {
+        throw new Error('invalid lifecycle event timestamp or sequence');
       }
+      const lifecycle = events.map((event): TurnLifecycleEvent => ({ seq: event.seq,
+        type: event.type as TurnLifecycleEvent['type'], createdAt: event.createdAt,
+        interaction: event.type === 'system/interaction/lifecycle' ? parseInteraction(event.data) : undefined,
+      }));
+      const planned = planTurnEventBatch(initial, lifecycle);
+      const snapshots = new Map<string, ThreadSnapshot>();
+      for (const op of planned.operations) {
+        if (op.kind === 'start' && op.startedAt >= processStart) {
+          snapshots.set(op.turnId, await snapshotThread(threadId));
+        }
+      }
+      if (disposed) return;
+      persistPlannedBatch(planned, {
+        transaction: (work) => db.transaction(work)(),
+        apply(op) {
+          if (op.kind === 'start') startInterval(threadId, op.turnId, op.startedAt, snapshots.get(op.turnId));
+          else if (op.kind === 'pause') closeIntervals(threadId, op.endedAt, 'interaction-pending');
+          else closeIntervals(threadId, op.reason === 'superseded' ? null : op.endedAt, op.reason);
+        },
+        persistCursor(next) {
+          saveCursor.run(threadId, next.lastSeq, next.activeTurnId, JSON.stringify(next.pendingInteractionIds));
+        },
+      });
+      if (events.length < 1000) return;
+      if (planned.next.lastSeq <= initial.lastSeq) throw new Error('event pagination made no progress');
     }
-
-    // A lifecycle replay can discover an old pending interaction after a
-    // newer session was inferred from the thread's current `active` status.
-    // That session cannot cover `at`, but it is entirely inside the waiting
-    // period and must not remain open. Preserve the row for auditability while
-    // reducing it to zero duration.
-    const inferred = openSessions.get(threadId);
-    if (inferred && inferred.startedAt > at) {
-      statements.ensureSessionClosure.run(inferred.id, "interaction-pending");
-      statements.truncateSession.run(inferred.startedAt, inferred.id);
-      statements.closeSessionMetadata.run("interaction-pending", inferred.id);
-      openSessions.delete(threadId);
-    }
+    throw new Error('event backlog not yet drained');
   }
 
-  function publishActivityStatus() {
-    bb.realtime.publish("activity-status", { active: openSessions.size > 0 });
-  }
-
-  async function markActive(threadId: string, at: number) {
+  async function syncThread(threadId: string, terminal = false) {
+    watched.add(threadId);
     await withLock(threadId, async () => {
-      if (openSessions.has(threadId)) return;
-      startPolling(threadId);
-      const durable = statements.getCursor.get(threadId) as CursorRow | undefined;
-      if (parsePendingInteractionIds(durable?.pending_interaction_ids).length > 0) {
+      try {
+        // Expire evidence before doing network work. Slow or failing SDK calls
+        // cannot bridge an unobserved gap or keep a clock running indefinitely.
+        const prior = openTurn.get(threadId) as OpenTurn | undefined;
+        if (prior?.confirmed_at != null && Date.now() - prior.confirmed_at > OBSERVATION_GAP_MS) {
+          db.transaction(() => closeIntervals(threadId, null, 'observation-gap'))();
+        }
         await drainEvents(threadId);
+        if (disposed) return;
+        if (terminal) {
+          db.transaction(() => {
+            closeIntervals(threadId, null, 'inactive');
+            db.prepare(`UPDATE poll_cursors SET active_turn_id = NULL, pending_interaction_ids = '[]'
+              WHERE thread_id = ?`).run(threadId);
+          })();
+          watched.delete(threadId);
+          publishActivityStatus();
+          return;
+        }
+        const thread = await bb.sdk.threads.get({ threadId, signal: abort.signal });
+        if (disposed) return;
+        const running = thread.status === 'active' && thread.runtime.displayStatus === 'active'
+          && thread.archivedAt === null && thread.deletedAt === null;
+        const pending = running ? await bb.sdk.threads.interactions.list({ threadId, signal: abort.signal }) : [];
+        if (disposed) return;
+        const cursor = cursorQuery.get(threadId) as CursorRow | undefined;
+        if (!running || pending.length || !cursor?.active_turn_id
+          || parsePendingInteractionIds(cursor.pending_interaction_ids).length) {
+          db.transaction(() => closeIntervals(threadId, null, 'not-running'))();
+          if (!running && thread.status !== 'active') {
+            db.prepare(`UPDATE poll_cursors SET active_turn_id = NULL WHERE thread_id = ?`).run(threadId);
+            watched.delete(threadId);
+          }
+          publishActivityStatus();
+          return;
+        }
+        const now = Date.now();
+        const existing = openTurn.get(threadId) as OpenTurn | undefined;
+        const needsSegment = !existing || (existing.confirmed_at === null && existing.started_at < processStart)
+          || (existing.confirmed_at !== null && now - existing.confirmed_at > OBSERVATION_GAP_MS);
+        const snapshot = needsSegment ? await snapshotThread(threadId) : undefined;
+        if (disposed) return;
+        db.transaction(() => {
+          if (needsSegment) {
+            closeIntervals(threadId, null, 'unobserved');
+            startInterval(threadId, `${cursor.active_turn_id}:observed:${now}`, now, snapshot);
+          }
+          const row = openTurn.get(threadId) as OpenTurn;
+          db.prepare(`INSERT INTO turn_observations (turn_row_id, confirmed_at) VALUES (?, ?)
+            ON CONFLICT(turn_row_id) DO UPDATE SET confirmed_at = MAX(confirmed_at, excluded.confirmed_at)`)
+            .run(row.id, Math.max(row.started_at, now));
+        })();
+        publishActivityStatus();
+      } finally {
+        if (terminal && !disposed) {
+          watched.delete(threadId);
+          db.prepare(`UPDATE poll_cursors SET active_turn_id = NULL, pending_interaction_ids = '[]'
+            WHERE thread_id = ?`).run(threadId);
+        }
+      }
+    });
+  }
+
+  async function recheckHistory(threadId: string) {
+    const events: TurnLifecycleEvent[] = [];
+    let afterSeq = 0;
+    for (let page = 0; page < 100; page += 1) {
+      const rows = await bb.sdk.threads.events.list({ threadId,
+        types: ['turn/started', 'turn/completed', 'system/interaction/lifecycle'],
+        order: 'asc', limit: '1000', signal: abort.signal,
+        ...(afterSeq ? { afterSeq: String(afterSeq) } : {}),
+      });
+      if (disposed) return;
+      for (const row of rows) {
+        if (!Number.isFinite(row.createdAt) || row.createdAt < 0 || row.createdAt > Date.now()
+          || !Number.isSafeInteger(row.seq) || row.seq <= afterSeq) throw new Error('invalid historical event page');
+        events.push({ seq: row.seq, type: row.type as TurnLifecycleEvent['type'], createdAt: row.createdAt,
+          interaction: row.type === 'system/interaction/lifecycle' ? parseInteraction(row.data) : undefined });
+      }
+      if (rows.length < 1000) {
+        const evidence = historicalTurnEvidence(events);
+        db.transaction(() => {
+          const legacy = db.prepare(`SELECT t.id, t.turn_id, t.started_at, t.ended_at
+            FROM turns t LEFT JOIN turn_metadata m ON m.turn_row_id = t.id
+            WHERE t.thread_id = ? AND COALESCE(m.accounting_version, 0) = 0 AND t.ended_at IS NOT NULL`)
+            .all(threadId) as { id: number; turn_id: string; started_at: number; ended_at: number }[];
+          for (const turn of legacy) {
+            let ordinal = 0;
+            for (const interval of evidence) {
+              if (interval.turnId !== turn.turn_id.split(':')[0]) continue;
+              const start = Math.max(turn.started_at, interval.start);
+              const end = Math.min(turn.ended_at, interval.end);
+              if (end <= start) continue;
+              db.prepare(`INSERT INTO turn_history_segments (turn_row_id, ordinal, started_at, ended_at)
+                VALUES (?, ?, ?, ?)`).run(turn.id, ordinal++, start, end);
+            }
+            db.prepare(`INSERT INTO turn_metadata (turn_row_id, attribution_quality, closure_reason, accounting_version)
+              VALUES (?, 'legacy-unknown', 'legacy-unknown', 2) ON CONFLICT(turn_row_id)
+              DO UPDATE SET accounting_version = 2`).run(turn.id);
+          }
+        })();
         return;
       }
-
-      // Anchor inferred working time to the observed active transition before
-      // replaying history. Otherwise a missing cursor can backdate this
-      // session to the thread's oldest retained turn. If replay discovers an
-      // older pending interaction, pauseIntervals reduces this row to zero.
-      const snapshot = await snapshotThread(threadId);
-      const session = db.transaction(() => {
-        return openSessionInterval(threadId, at, snapshot);
-      })();
-      openSessions.set(threadId, session);
-      publishActivityStatus();
-      await drainEvents(threadId);
-    });
-  }
-
-  function stopPolling(threadId: string) {
-    const poller = pollers.get(threadId);
-    if (poller) clearInterval(poller);
-    pollers.delete(threadId);
-  }
-  function startPolling(threadId: string) {
-    if (pollers.has(threadId)) return;
-    pollers.set(threadId, setInterval(
-      () => void withLock(threadId, () => drainEvents(threadId)), POLL_MS,
-    ));
-  }
-
-  async function drainEvents(threadId: string) {
-    const durable = statements.getCursor.get(threadId) as CursorRow | undefined;
-    const openTurn = statements.findOpenTurn.get(threadId) as
-      | { turn_id: string; started_at: number } | undefined;
-    const initial: CollectorCursor = {
-      lastSeq: durable?.last_seq ?? 0,
-      activeTurnId: durable?.active_turn_id ?? openTurn?.turn_id ?? null,
-      openTurnId: openTurn?.turn_id ?? null,
-      openTurnStartedAt: openTurn?.started_at ?? 0,
-      pendingInteractionIds: parsePendingInteractionIds(durable?.pending_interaction_ids),
-    };
-    const events = await bb.sdk.threads.events.list({
-      threadId,
-      types: ["turn/started", "turn/completed", "system/interaction/lifecycle"],
-      order: "asc",
-      limit: "1000",
-      ...(initial.lastSeq > 0 ? { afterSeq: String(initial.lastSeq) } : {}),
-    });
-    const lifecycleEvents: TurnLifecycleEvent[] = events
-      .filter((event) => event.type === "turn/started"
-        || event.type === "turn/completed"
-        || event.type === "system/interaction/lifecycle")
-      .map((event) => ({
-        seq: event.seq,
-        type: event.type as TurnLifecycleEvent["type"],
-        createdAt: event.createdAt,
-        interaction: event.type === "system/interaction/lifecycle"
-          ? parseInteraction(event.data)
-          : undefined,
-      }));
-    const planned = planTurnEventBatch(initial, lifecycleEvents);
-    if (planned.next.lastSeq === initial.lastSeq) { cursors.set(threadId, initial); return }
-
-    const startMetadata = new Map<string, ThreadSnapshot>();
-    for (const operation of planned.operations) {
-      if (operation.kind === "start" && (operation.startedAt >= processStart - POLL_MS || operation.turnId.includes(":resume:"))) {
-        startMetadata.set(operation.turnId, await snapshotThread(threadId));
-      }
+      const next = Math.max(...rows.map((row) => row.seq));
+      if (next <= afterSeq) throw new Error('historical pagination made no progress');
+      afterSeq = next;
     }
-
-    let activityChanged = false;
-    const committedCursor = persistPlannedBatch(planned, {
-      transaction: (work) => db.transaction(work)(),
-      apply: (operation) => {
-        if (operation.kind === "pause") {
-          pauseIntervals(threadId, operation.endedAt);
-          activityChanged = true;
-          return;
-        }
-        if (operation.kind === "close") {
-          markOpenTurnClosures(threadId, operation.reason);
-          statements.closeOpenTurns.run(operation.endedAt, threadId);
-          statements.closeOpenTurnMetadata.run(operation.reason, threadId);
-          return;
-        }
-        const snapshot = startMetadata.get(operation.turnId);
-        let currentSession = openSessions.get(threadId);
-        if (!currentSession) {
-          currentSession = openSessionInterval(threadId, operation.startedAt, snapshot ?? {
-            projectId: null, projectName: null, hostId: null, machineName: null,
-            providerId: "Unknown", model: "unknown",
-          });
-          activityChanged = true;
-        }
-        const belongsToCurrentSession = operation.startedAt >= currentSession.startedAt;
-        statements.insertTurn.run(
-          threadId, operation.turnId, belongsToCurrentSession ? currentSession.id : null,
-          snapshot?.providerId ?? "", snapshot?.model ?? "unknown", operation.startedAt,
-        );
-        const turn = statements.findTurn.get(threadId, operation.turnId) as { id: number };
-        statements.turnMetadata.run(turn.id, snapshot ? "sampled-live" : "historical-unknown");
-      },
-      persistCursor: (next) => {
-        statements.setCursor.run(
-          threadId, next.lastSeq, next.activeTurnId, JSON.stringify(next.pendingInteractionIds),
-        );
-      },
-    });
-    cursors.set(threadId, committedCursor);
-    if (activityChanged) publishActivityStatus();
+    throw new Error('historical event backlog too large');
   }
 
-  function markInactive(threadId: string, at: number, reason: string) {
-    return withLock(threadId, async () => {
-      try { await drainEvents(threadId) }
-      catch (error) { bb.log.warn(`final event drain failed for ${threadId}: ${String(error)}`) }
-      closeThreadIntervals(threadId, at, reason);
-      openSessions.delete(threadId);
-      publishActivityStatus();
-      stopPolling(threadId);
-    });
+  let historyAfter: string | null = null;
+  async function recheckPendingHistory(limit: number) {
+    const after = limit === 10 ? historyAfter : null;
+    const rows = db.prepare(`SELECT DISTINCT t.thread_id FROM turns t
+      LEFT JOIN turn_metadata m ON m.turn_row_id = t.id
+      WHERE COALESCE(m.accounting_version, 0) = 0 AND t.ended_at IS NOT NULL
+      AND (? IS NULL OR t.thread_id > ?) ORDER BY t.thread_id LIMIT ?`)
+      .all(after, after, limit) as { thread_id: string }[];
+    for (const row of rows) await withLock(row.thread_id, () => recheckHistory(row.thread_id));
+    if (limit === 10) historyAfter = rows.at(-1)?.thread_id ?? null;
+    return rows.length;
   }
 
-  let recoveryComplete = false;
   async function reconcile() {
-    if (!recoveryComplete) {
-      // Never bridge an unobserved restart gap, even for a still-active thread.
-      for (const row of statements.listOpenSessions.all() as {
-        id: number; thread_id: string; started_at: number;
-      }[]) {
-        const end = crashRecoveryEnd(row.started_at, persistedHeartbeat, processStart, HEARTBEAT_GRACE_MS);
-        db.transaction(() => {
-          markOpenTurnClosures(row.thread_id, "crash-recovery");
-          statements.closeOpenTurns.run(end, row.thread_id);
-          statements.closeOpenTurnMetadata.run("crash-recovery", row.thread_id);
-          statements.ensureSessionClosure.run(row.id, "crash-recovery");
-          statements.closeSession.run(end, row.id);
-          statements.closeSessionMetadata.run("crash-recovery", row.id);
-        })();
-      }
-      recoveryComplete = true;
+    const candidates = new Set(watched);
+    for (let offset = 0; ; offset += 100) {
+      const rows = await bb.sdk.threads.list({ limit: 100, offset, includeHidden: true, signal: abort.signal });
+      if (disposed) return;
+      for (const row of rows) if (row.status === 'active' && !row.archivedAt && !row.deletedAt) candidates.add(row.id);
+      if (rows.length < 100) break;
     }
-    let offset = 0;
-    for (;;) {
-      const rows = await bb.sdk.threads.list({ limit: 100, offset, includeHidden: true });
-      for (const thread of rows) if (thread.status === "active") void markActive(thread.id, Date.now());
-      offset += rows.length;
-      if (rows.length < 100 || offset >= 5000) break;
-    }
+    // Include previously tracked threads even if idle/archived/absent from list.
+    for (const id of candidates) await syncThread(id);
+    // Bound upgrade work per sweep; an explicit CLI command can finish it now.
+    await recheckPendingHistory(10);
   }
 
-  bb.events.on("thread.active", ({ thread }) => void markActive(thread.id, Date.now()));
-  bb.events.on("thread.idle", ({ thread }) => void markInactive(thread.id, Date.now(), "idle"));
-  bb.events.on("thread.failed", ({ thread }) => void markInactive(thread.id, Date.now(), "failed"));
-  bb.events.on("thread.archived", ({ thread }) => void markInactive(thread.id, Date.now(), "archived"));
-  bb.events.on("thread.deleted", ({ thread }) => void markInactive(thread.id, Date.now(), "deleted"));
+  // Close orphan turns too, including those with no session. A global process
+  // heartbeat says nothing about whether a particular agent was active.
+  db.transaction(() => {
+    const rows = db.prepare(`SELECT thread_id FROM turns WHERE ended_at IS NULL
+      UNION SELECT thread_id FROM sessions WHERE ended_at IS NULL`).all() as { thread_id: string }[];
+    for (const row of rows) closeIntervals(row.thread_id, null, 'crash-recovery');
+  })();
 
-  /** Every interval overlapping a window, aggregated. `to` also closes open rows. */
-  function analyzeWindow(from: number, to: number, openAt: number, timeZone: string) {
-    const sessions = db.prepare(`SELECT s.id, s.project_name, s.machine_name, s.started_at,
-      COALESCE(s.ended_at, ?) AS ended_at,
-      COALESCE(sm.closure_reason, CASE WHEN s.ended_at IS NULL THEN 'open' ELSE 'legacy-unknown' END) AS closure_reason
-      FROM sessions s LEFT JOIN session_metadata sm ON sm.session_id = s.id
-      WHERE s.started_at < ? AND COALESCE(s.ended_at, ?) > ?`
-    ).all(openAt, to, openAt, from) as {
-      id: number; project_name: string | null; machine_name: string | null;
-      started_at: number; ended_at: number; closure_reason: string;
-    }[];
-    const turns = db.prepare(`SELECT t.provider_id, t.model, t.started_at,
-      COALESCE(t.ended_at, ?) AS ended_at, s.project_name,
+  bb.events.on('thread.active', ({ thread }) => syncThread(thread.id));
+  bb.events.on('thread.idle', ({ thread }) => syncThread(thread.id, true));
+  bb.events.on('thread.failed', ({ thread }) => syncThread(thread.id, true));
+  bb.events.on('thread.archived', ({ thread }) => syncThread(thread.id, true));
+  bb.events.on('thread.deleted', ({ thread }) => syncThread(thread.id, true));
+
+  /** Sessions provide dimensions; only bounded turn evidence contributes time.
+   * Legacy inflated session rows remain intact for audit/rollback, but cannot
+   * affect totals, daily bars, profiles, or project/machine breakdowns. */
+  function analyzeWindow(from: number, to: number, timeZone: string) {
+    const rows = db.prepare(`SELECT t.id, t.provider_id, t.model,
+      CASE WHEN tm.accounting_version = 2 THEN h.started_at ELSE t.started_at END AS started_at,
+      CASE
+        WHEN tm.accounting_version = 2 THEN h.ended_at
+        WHEN t.ended_at IS NULL THEN COALESCE(o.confirmed_at, t.started_at)
+        WHEN tm.closure_reason IN ('completed', 'interaction-pending') THEN t.ended_at
+        ELSE MIN(t.ended_at, COALESCE(o.confirmed_at, t.started_at))
+      END AS ended_at, s.project_name, s.machine_name,
       COALESCE(tm.attribution_quality, 'legacy-unknown') AS attribution_quality,
-      COALESCE(tm.closure_reason, CASE WHEN t.ended_at IS NULL THEN 'open' ELSE 'legacy-unknown' END) AS closure_reason
+      COALESCE(tm.closure_reason, 'legacy-unknown') AS closure_reason
       FROM turns t LEFT JOIN sessions s ON s.id = t.session_id
       LEFT JOIN turn_metadata tm ON tm.turn_row_id = t.id
-      WHERE t.started_at < ? AND COALESCE(t.ended_at, ?) > ?`
-    ).all(openAt, to, openAt, from) as {
-      provider_id: string; model: string; started_at: number; ended_at: number;
-      project_name: string | null; attribution_quality: string; closure_reason: string;
-    }[];
+      LEFT JOIN turn_observations o ON o.turn_row_id = t.id
+      LEFT JOIN turn_history_segments h ON h.turn_row_id = t.id AND tm.accounting_version = 2
+      WHERE t.started_at < ? AND tm.accounting_version IN (2, 3)`).all(to) as {
+        id: number; provider_id: string; model: string; started_at: number; ended_at: number;
+        project_name: string | null; machine_name: string | null;
+        attribution_quality: string; closure_reason: string;
+      }[];
+    const turns = rows.filter((row) => row.ended_at > from && row.ended_at > row.started_at);
     return aggregateAnalytics(
-      sessions.map((session): SessionInterval => ({
-        id: session.id, projectName: session.project_name, machineName: session.machine_name,
-        start: session.started_at, end: session.ended_at, closureReason: session.closure_reason,
+      turns.map((row): SessionInterval => ({ id: row.id,
+        projectName: row.project_name, machineName: row.machine_name,
+        start: row.started_at, end: row.ended_at, closureReason: row.closure_reason,
       })),
-      turns.map((turn): TurnInterval => ({
-        providerId: turn.provider_id, model: turn.model, projectName: turn.project_name,
-        start: turn.started_at, end: turn.ended_at,
-        attributionQuality: turn.attribution_quality, closureReason: turn.closure_reason,
+      turns.map((row): TurnInterval => ({ providerId: row.provider_id, model: row.model,
+        projectName: row.project_name, start: row.started_at, end: row.ended_at,
+        attributionQuality: row.attribution_quality, closureReason: row.closure_reason,
       })), from, to, timeZone,
     );
   }
@@ -599,10 +569,10 @@ export default async function plugin(bb: BbPluginApi) {
       SELECT MIN(started_at) AS at FROM sessions UNION ALL SELECT MIN(started_at) AS at FROM turns
     )`).get() as { earliest: number | null };
     const from = rangeStart(range, to, earliest.earliest ?? undefined, timeZone);
-    const analytics = analyzeWindow(from, to, to, timeZone);
+    const analytics = analyzeWindow(from, to, timeZone);
     // The comparison window is the same length immediately before this one.
     // "All time" starts at the first row, so nothing precedes it to compare.
-    const before = range === "all" ? null : analyzeWindow(from - (to - from), from, to, timeZone);
+    const before = range === "all" ? null : analyzeWindow(from - (to - from), from, timeZone);
     return {
       range: { key: range, from, to, timezone: timeZone },
       generatedAt: to,
@@ -656,7 +626,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   bb.rpc.register(rpcContract, {
-    getActivityStatus() { return { active: openSessions.size > 0 } },
+    getActivityStatus() { return { active: isActive() } },
     getSummary({ range, timezone }) { return computeSummary(range, timezone) },
   });
   bb.cli.register({
@@ -664,8 +634,17 @@ export default async function plugin(bb: BbPluginApi) {
     commands: [
       { name: "today", summary: "Today's agent activity", usage: "bb wakatime today" },
       { name: "week", summary: "The last 7 calendar days", usage: "bb wakatime week" },
+      { name: "recheck-history", summary: "Verify legacy turn intervals against retained lifecycle events", usage: "bb wakatime recheck-history" },
     ],
     async run(argv) {
+      if (argv[0] === 'recheck-history') {
+        const checked = await recheckPendingHistory(10_000);
+        const remaining = db.prepare(`SELECT COUNT(DISTINCT t.thread_id) AS count FROM turns t
+          LEFT JOIN turn_metadata m ON m.turn_row_id = t.id
+          WHERE COALESCE(m.accounting_version, 0) = 0 AND t.ended_at IS NOT NULL`).get() as { count: number };
+        return { exitCode: remaining.count ? 1 : 0,
+          stdout: `Historical threads checked: ${checked}; awaiting evidence: ${remaining.count}\n` };
+      }
       const summary = computeSummary(argv[0] === "week" ? "7d" : "today");
       const format = (ms: number) => {
         const minutes = Math.round(ms / 60_000);
@@ -683,27 +662,31 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  bb.onDispose(() => {
+    disposed = true;
+    abort.abort();
+    db.transaction(() => {
+      const rows = db.prepare(`SELECT DISTINCT thread_id FROM turns WHERE ended_at IS NULL`).all() as { thread_id: string }[];
+      for (const row of rows) closeIntervals(row.thread_id, null, 'plugin-dispose');
+    })();
+    watched.clear();
+  });
   try { await reconcile() }
   catch (error) { bb.log.warn(`startup reconciliation failed: ${String(error)}`) }
-  bb.background.service("reconciler", {
+  bb.background.service('reconciler', {
     async start(signal) {
-      statements.setHeartbeat.run(String(Date.now()));
-      while (!signal.aborted) {
-        await sleep(HEARTBEAT_MS, signal);
-        if (signal.aborted) break;
-        statements.setHeartbeat.run(String(Date.now()));
+      while (!signal.aborted && !disposed) {
+        await new Promise<void>((resolve) => {
+          const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); };
+          const timer = setTimeout(done, POLL_MS);
+          signal.addEventListener('abort', done, { once: true });
+          if (signal.aborted) done();
+        });
+        if (signal.aborted || disposed) break;
         try { await reconcile() }
         catch (error) { bb.log.warn(`periodic reconciliation failed: ${String(error)}`) }
       }
     },
   });
-  bb.onDispose(() => {
-    const now = Date.now();
-    for (const poller of pollers.values()) clearInterval(poller);
-    pollers.clear();
-    for (const threadId of openSessions.keys()) closeThreadIntervals(threadId, now, "plugin-dispose");
-    openSessions.clear();
-    statements.setHeartbeat.run(String(now));
-  });
-  bb.log.info("wakatime analytics v2 loaded");
+  bb.log.info('wakatime strict turn accounting loaded');
 }

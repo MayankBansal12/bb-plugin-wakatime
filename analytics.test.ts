@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   aggregateAnalytics,
   concurrencyStats,
-  crashRecoveryEnd,
   activityProfile,
   dayKey,
   dayKeyToUtc,
@@ -141,15 +140,7 @@ describe("aggregate analytics", () => {
   });
 });
 
-describe("recovery and percentiles", () => {
-  it("bounds crash recovery by the persisted heartbeat instead of restart time", () => {
-    const started = 1_000;
-    expect(crashRecoveryEnd(started, 2_000, 100_000, 500)).toBe(2_500);
-    expect(crashRecoveryEnd(started, 200_000, 100_000, 500)).toBe(100_000);
-    expect(crashRecoveryEnd(started, null, 100_000, 500)).toBe(1_500);
-    expect(crashRecoveryEnd(5_000, 1_000, 100_000, 500)).toBe(5_000);
-  });
-
+describe("percentiles", () => {
   it("uses a conventional median and nearest-rank p90", () => {
     expect(percentile([], 0.9)).toBe(0);
     expect(percentile([10], 0.5)).toBe(10);

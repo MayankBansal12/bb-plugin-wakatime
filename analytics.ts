@@ -647,17 +647,4 @@ export function aggregateAnalytics(
   };
 }
 
-export function crashRecoveryEnd(
-  sessionStart: number,
-  lastHeartbeat: number | null,
-  now: number,
-  graceMs: number,
-): number {
-  const heartbeat =
-    lastHeartbeat !== null && Number.isFinite(lastHeartbeat)
-      ? lastHeartbeat
-      : sessionStart;
-  return Math.max(sessionStart, Math.min(now, heartbeat + graceMs));
-}
-
 export { DAY_MS };
